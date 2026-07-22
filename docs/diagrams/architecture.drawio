@@ -1,0 +1,167 @@
+<mxfile host="app.diagrams.net" modified="2026-07-20T12:00:00.000Z" agent="Claude" version="21.0.0" type="device">
+  <diagram id="architecture" name="系统架构">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="TikTok B2B 业务拓展机器人 — 系统架构" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="400" y="20" width="500" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Web UI Layer -->
+        <mxCell id="ui_group" value="Web UI (Vue 3 + Element Plus)" style="swimlane;startSize=30;fillColor=#e8f5e9;strokeColor=#43a047;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="80" width="1100" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_dashboard" value="📊 Dashboard" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="20" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_users" value="👥 Users" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="145" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_leads" value="🔍 Leads" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="270" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_pipeline" value="🔄 Pipeline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="395" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_reports" value="📈 Reports" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="520" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_accounts" value="👤 Accounts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="645" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_llm" value="🛡️ LLM Config" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="770" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="ui_runtime" value="⚙️ Runtime" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;fontSize=11;" vertex="1" parent="ui_group">
+          <mxGeometry x="895" y="40" width="110" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- HTTP Arrow -->
+        <mxCell id="http_arrow" value="HTTP / REST" style="shape=flexArrow;endArrow=classic;html=1;strokeWidth=2;fillColor=#fff3e0;strokeColor=#f57c00;fontStyle=1;fontSize=11;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="650" y="210" as="sourcePoint"/>
+            <mxPoint x="650" y="250" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API Layer -->
+        <mxCell id="api_group" value="REST API (FastAPI + Uvicorn) — 31 端点" style="swimlane;startSize=30;fillColor=#e3f2fd;strokeColor=#1976d2;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="250" width="1100" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_auth" value="🔐 Auth&#xa;JWT + API Key" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="20" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_users" value="👥 Users&#xa;CRUD + 筛选" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="165" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_pipeline" value="🔄 Pipeline&#xa;启停 + 事件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="310" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_reports" value="📈 Reports&#xa;日报 + 趋势" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="455" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_accounts" value="👤 Accounts&#xa;QR 登录 + Cookie" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="600" y="40" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_leads" value="🔍 Leads&#xa;公开搜索" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="755" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="api_config" value="⚙️ Config&#xa;配置管理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1976d2;fontSize=11;" vertex="1" parent="api_group">
+          <mxGeometry x="900" y="40" width="130" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Core Layer -->
+        <mxCell id="core_group" value="Core 业务逻辑层 (tiktok_bot_core)" style="swimlane;startSize=30;fillColor=#fce4ec;strokeColor=#c62828;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="380" width="1100" height="200" as="geometry"/>
+        </mxCell>
+
+        <!-- Core sub-modules -->
+        <mxCell id="core_models" value="Models&#xa;(ORM)&#xa;9 张表" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="20" y="45" width="120" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_storage" value="Storage&#xa;SQLite + ChromaDB&#xa;CRUD 仓库" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="155" y="45" width="140" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_services" value="Services&#xa;Pipeline + Auth&#xa;QR 登录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="310" y="45" width="140" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_events" value="Events&#xa;异步事件总线&#xa;SSE 推送" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="465" y="45" width="130" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_plugins" value="Plugins&#xa;Collector / Channel&#xa;/ Filter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="610" y="45" width="140" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_platforms" value="Platforms&#xa;TikTok + 抖音&#xa;双平台抽象" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="765" y="45" width="130" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_llm" value="LLM Client&#xa;DeepSeek&#xa;v4 Pro" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;fontSize=11;fontStyle=1;" vertex="1" parent="core_group">
+          <mxGeometry x="910" y="45" width="120" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Core internal connections -->
+        <mxCell id="core_conn1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c62828;strokeWidth=1;dashed=1;" edge="1" parent="core_group" source="core_models" target="core_storage">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_conn2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c62828;strokeWidth=1;dashed=1;" edge="1" parent="core_group" source="core_services" target="core_models">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_conn3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c62828;strokeWidth=1;dashed=1;" edge="1" parent="core_group" source="core_services" target="core_events">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="core_conn4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c62828;strokeWidth=1;dashed=1;" edge="1" parent="core_group" source="core_services" target="core_plugins">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- External Services -->
+        <mxCell id="ext_group" value="外部服务" style="swimlane;startSize=30;fillColor=#f3e5f5;strokeColor=#7b1fa2;rounded=1;arcSize=8;shadow=1;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="100" y="620" width="1100" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_playwright" value="🎭 Playwright&#xa;Chromium 浏览器自动化&#xa;QR 扫码 / 搜索 / 评论 / 私信" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;fontSize=11;fontStyle=1;" vertex="1" parent="ext_group">
+          <mxGeometry x="20" y="40" width="200" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_deepseek" value="🧠 DeepSeek v4 Pro&#xa;用户筛选 / 策略生成&#xa;经验分析 / 话术生成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;fontSize=11;fontStyle=1;" vertex="1" parent="ext_group">
+          <mxGeometry x="240" y="40" width="200" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_tiktok" value="📱 TikTok&#xa;tiktok.com&#xa;国际版" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;fontSize=11;fontStyle=1;" vertex="1" parent="ext_group">
+          <mxGeometry x="460" y="40" width="150" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_douyin" value="📱 抖音&#xa;douyin.com&#xa;中国版" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;fontSize=11;fontStyle=1;" vertex="1" parent="ext_group">
+          <mxGeometry x="630" y="40" width="150" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="ext_telegram" value="📬 Telegram Bot&#xa;日报推送&#xa;通知" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;fontSize=11;fontStyle=1;" vertex="1" parent="ext_group">
+          <mxGeometry x="800" y="40" width="150" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- External arrows -->
+        <mxCell id="ext_arrow1" value="" style="shape=flexArrow;endArrow=classic;html=1;strokeWidth=2;fillColor=#f3e5f5;strokeColor=#7b1fa2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="350" y="580" as="sourcePoint"/>
+            <mxPoint x="200" y="660" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ext_arrow2" value="" style="shape=flexArrow;endArrow=classic;html=1;strokeWidth=2;fillColor=#f3e5f5;strokeColor=#7b1fa2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="580" as="sourcePoint"/>
+            <mxPoint x="340" y="660" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ext_arrow3" value="" style="shape=flexArrow;endArrow=classic;html=1;strokeWidth=2;fillColor=#f3e5f5;strokeColor=#7b1fa2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="830" y="580" as="sourcePoint"/>
+            <mxPoint x="535" y="660" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ext_arrow4" value="" style="shape=flexArrow;endArrow=classic;html=1;strokeWidth=2;fillColor=#f3e5f5;strokeColor=#7b1fa2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="870" y="580" as="sourcePoint"/>
+            <mxPoint x="705" y="660" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
