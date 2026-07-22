@@ -1,0 +1,24 @@
+@import './design-system.css';
+
+/* Reset for app root — design system already handles body/html */
+#app {
+  min-height: 100vh;
+}
+
+/* Element Plus theming overrides — match new design tokens */
+:root {
+  --el-color-primary: var(--fg);
+  --el-color-primary-light-3: oklch(30% 0.012 280);
+  --el-color-primary-light-5: oklch(40% 0.012 280);
+  --el-color-primary-light-7: oklch(60% 0.012 280);
+  --el-color-primary-light-9: oklch(85% 0.008 280);
+  --el-color-primary-dark-2: oklch(15% 0.012 280);
+  --el-color-success: var(--ok);
+  --el-color-warning: var(--warn);
+  --el-color-danger: var(--err);
+  --el-color-info: var(--muted);
+  --el-border-radius-base: 8px;
+  --el-font-family: var(--font-sans);
+}
+
+a { color: inherit; text-decoration: none; }

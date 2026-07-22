@@ -1,0 +1,11 @@
+name: tiktok-reports
+version: "1.0.0"
+description: "查看日报/趋势数据"
+triggers:
+  - "查看日报"
+  - "数据报告"
+  - "今日数据"
+  - "daily report"
+  - "show report"
+tools_required:
+  - cli

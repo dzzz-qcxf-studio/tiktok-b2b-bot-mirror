@@ -1,0 +1,12 @@
+name: tiktok-users
+version: "1.0.0"
+description: "查询/筛选 TikTok B2B 用户列表"
+triggers:
+  - "查询用户"
+  - "用户列表"
+  - "查看用户"
+  - "筛选用户"
+  - "list users"
+  - "show users"
+tools_required:
+  - cli

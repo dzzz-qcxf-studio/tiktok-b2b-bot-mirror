@@ -1,0 +1,11 @@
+name: tiktok-pipeline
+version: "1.0.0"
+description: "运行/查看 TikTok B2B Pipeline 状态"
+triggers:
+  - "运行Pipeline"
+  - "执行Pipeline"
+  - "开始搜集用户"
+  - "run pipeline"
+  - "start outreach"
+tools_required:
+  - cli

@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+*.swp
+
+# Virtual environment
+venv/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Data (运行时生成)
+data/*.db
+data/*.sqlite*
+data/chroma_db/
+data/reports/
+data/logs/
+data/screenshots/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vue / Node
+ui/node_modules/
+ui/dist/
+ui/.env.local
+ui/npm-debug.log*
+ui/yarn-debug.log*
+ui/yarn-error.log*
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Coverage
+*.coverage
+coverage.xml
+
+# Misc
+*.bak
+*.tmp
+.cache/
+data/qrcodes/
+MediaCrawler_ref/

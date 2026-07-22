@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiktok-bot-software"
+version = "0.1.0"
+description = "TikTok B2B 业务拓展机器人 - 软件层"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "tiktok-bot"}]
+
+dependencies = [
+    # 数据
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.19.0",
+    "alembic>=1.13.0",
+    "chromadb>=0.4.0",
+
+    # 浏览器自动化
+    "playwright>=1.40.0",
+
+    # LLM
+    "openai>=1.0.0",
+
+    # 配置
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+
+    # 通知
+    "python-telegram-bot>=20.0",
+
+    # 可视化
+    "matplotlib>=3.8.0",
+]
+
+[project.optional-dependencies]
+# CLI 工具
+cli = ["click>=8.1.0", "rich>=13.0.0"]
+
+# REST API
+api = ["fastapi>=0.109.0", "uvicorn[standard]>=0.25.0", "python-multipart>=0.0.6"]
+
+# 开发工具
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.21.0", "ruff>=0.1.0"]
+
+[project.scripts]
+tiktok-bot = "tiktok_bot_console.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tiktok_bot_*"]
+exclude = ["tests*", "data*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

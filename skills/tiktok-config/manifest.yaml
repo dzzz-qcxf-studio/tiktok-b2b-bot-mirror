@@ -1,0 +1,11 @@
+name: tiktok-config
+version: "1.0.0"
+description: "读取/修改系统配置"
+triggers:
+  - "查看配置"
+  - "修改配置"
+  - "设置参数"
+  - "config"
+  - "settings"
+tools_required:
+  - cli
