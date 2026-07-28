@@ -175,11 +175,35 @@ def test_login_session_new_records_initial_state():
     assert session.account_alias == "marketing_01"
     assert session.account_id == 42
     assert session.status == "launching"
-    assert session.error is None
     assert session.authenticated is False
     assert session.persisted is False
     assert session.started_at.tzinfo == timezone.utc
     assert session.expires_at > session.started_at
+
+
+def test_login_session_new_defaults_provider_and_error_fields_to_empty_strings():
+    session = LoginSession.new("douyin", "marketing_01")
+
+    assert session.browser_provider == ""
+    assert session.browser_profile_id == ""
+    assert session.error_code == ""
+    assert session.error_message == ""
+
+
+def test_login_session_new_preserves_provider_and_error_fields():
+    session = LoginSession.new(
+        "douyin",
+        "marketing_01",
+        browser_provider="playwright",
+        browser_profile_id="douyin-profile-42",
+        error_code="browser_launch_failed",
+        error_message="Browser could not be opened",
+    )
+
+    assert session.browser_provider == "playwright"
+    assert session.browser_profile_id == "douyin-profile-42"
+    assert session.error_code == "browser_launch_failed"
+    assert session.error_message == "Browser could not be opened"
 
 
 def test_login_session_new_generates_random_token():

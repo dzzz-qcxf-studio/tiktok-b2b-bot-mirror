@@ -45,9 +45,12 @@ class LoginSession:
     account_alias: str
     account_id: int | None
     status: str
+    browser_provider: str
+    browser_profile_id: str
     started_at: datetime
     expires_at: datetime
-    error: str | None
+    error_code: str
+    error_message: str
     authenticated: bool
     persisted: bool
 
@@ -57,6 +60,11 @@ class LoginSession:
         platform: str | PlatformType,
         account_alias: str,
         account_id: int | None = None,
+        *,
+        browser_provider: str = "",
+        browser_profile_id: str = "",
+        error_code: str = "",
+        error_message: str = "",
     ) -> "LoginSession":
         normalized_platform = PlatformType.parse(platform).value
         normalized_alias = _normalize_alias(account_alias)
@@ -67,9 +75,12 @@ class LoginSession:
             account_alias=normalized_alias,
             account_id=account_id,
             status="launching",
+            browser_provider=browser_provider,
+            browser_profile_id=browser_profile_id,
             started_at=started_at,
             expires_at=started_at + timedelta(minutes=5),
-            error=None,
+            error_code=error_code,
+            error_message=error_message,
             authenticated=False,
             persisted=False,
         )
