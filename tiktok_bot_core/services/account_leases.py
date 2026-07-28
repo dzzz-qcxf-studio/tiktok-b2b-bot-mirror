@@ -13,6 +13,9 @@ from typing import Any
 from tiktok_bot_core.platforms import PlatformType
 
 
+_ALLOWED_OWNER_PURPOSES = frozenset({"login", "pipeline", "check"})
+
+
 class AccountBusyError(RuntimeError):
     """账号已经被另一个用途持有。"""
 
@@ -24,6 +27,8 @@ class AccountBusyError(RuntimeError):
         owner: str,
         current_owner: str,
     ) -> None:
+        owner = _normalize_owner(owner)
+        current_owner = _normalize_owner(current_owner)
         self.platform = platform
         self.account_key = account_key
         self.owner = owner
@@ -34,7 +39,7 @@ class AccountBusyError(RuntimeError):
         )
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class AccountLease:
     """一次账号租约；可显式释放，也可作为异步上下文管理器使用。"""
 
@@ -43,18 +48,14 @@ class AccountLease:
     owner: str
     _manager: "AccountLeaseManager" = field(repr=False)
     _lease_id: object = field(repr=False)
-    _released: bool = field(default=False, init=False, repr=False)
 
     async def release(self) -> None:
         """释放租约；重复调用不产生副作用。"""
 
-        if self._released:
-            return
         await self._manager._release(
             (self.platform, self.account_key),
             self._lease_id,
         )
-        self._released = True
 
     async def __aenter__(self) -> "AccountLease":
         return self
@@ -129,6 +130,8 @@ def _normalize_account_key(account_id_or_alias: int | str) -> str:
     if isinstance(account_id_or_alias, str):
         normalized = account_id_or_alias.strip().casefold()
         if normalized:
+            if normalized.isdecimal():
+                return str(int(normalized))
             return normalized
     raise ValueError("account id or alias must be a non-empty string or integer")
 
@@ -136,4 +139,8 @@ def _normalize_account_key(account_id_or_alias: int | str) -> str:
 def _normalize_owner(owner: str) -> str:
     if not isinstance(owner, str) or not owner.strip():
         raise ValueError("owner must be a non-empty string")
-    return owner.strip()
+    purpose = owner.strip().partition(":")[0].casefold()
+    if purpose not in _ALLOWED_OWNER_PURPOSES:
+        allowed = ", ".join(sorted(_ALLOWED_OWNER_PURPOSES))
+        raise ValueError(f"owner purpose must be one of: {allowed}")
+    return purpose

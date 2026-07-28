@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timezone
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import tiktok_bot_core.services.interactive_login as interactive_login
 from tiktok_bot_core.services.account_leases import (
     AccountBusyError,
     AccountLeaseManager,
@@ -53,6 +55,34 @@ async def test_concurrent_acquire_is_atomic():
 
 
 @pytest.mark.asyncio
+async def test_numeric_key_concurrency_normalizes_id_and_zero_padded_aliases():
+    leases = AccountLeaseManager()
+    start = asyncio.Event()
+
+    async def compete(account_key: int | str, owner: str):
+        await start.wait()
+        return await leases.acquire("douyin", account_key, owner=owner)
+
+    attempts = [
+        asyncio.create_task(compete(7, "login:a")),
+        asyncio.create_task(compete("7", "pipeline:b")),
+        asyncio.create_task(compete("007", "check:c")),
+        asyncio.create_task(compete(" 007 ", "login:d")),
+    ]
+    await asyncio.sleep(0)
+    start.set()
+    results = await asyncio.gather(*attempts, return_exceptions=True)
+
+    acquired = [result for result in results if not isinstance(result, BaseException)]
+    rejected = [result for result in results if isinstance(result, AccountBusyError)]
+    for lease in acquired:
+        await lease.release()
+
+    assert len(acquired) == 1
+    assert len(rejected) == 3
+
+
+@pytest.mark.asyncio
 async def test_lease_platform_is_normalized_for_account_key():
     leases = AccountLeaseManager()
     first = await leases.acquire(" DY ", 1, owner="login:a")
@@ -83,16 +113,35 @@ async def test_new_account_alias_cannot_conflict_with_account_id_key():
 
 
 @pytest.mark.asyncio
-async def test_busy_error_reports_requested_and_current_owner():
+async def test_busy_error_owner_security_redacts_owner_details():
     leases = AccountLeaseManager()
-    first = await leases.acquire("douyin", 1, owner="login:a")
+    first = await leases.acquire(
+        "douyin",
+        1,
+        owner="login:current-secret-token",
+    )
 
     with pytest.raises(AccountBusyError) as error:
-        await leases.acquire("douyin", 1, owner="pipeline:b")
+        await leases.acquire(
+            "douyin",
+            1,
+            owner="pipeline:requested-secret-token",
+        )
 
-    assert error.value.owner == "pipeline:b"
-    assert error.value.current_owner == "login:a"
+    assert error.value.owner == "pipeline"
+    assert error.value.current_owner == "login"
+    public_error = f"{error.value!s} {error.value!r}"
+    assert "current-secret-token" not in public_error
+    assert "requested-secret-token" not in public_error
     await first.release()
+
+
+@pytest.mark.asyncio
+async def test_lease_owner_security_rejects_unknown_purpose():
+    leases = AccountLeaseManager()
+
+    with pytest.raises(ValueError):
+        await leases.acquire("douyin", 1, owner="maintenance:secret-token")
 
 
 @pytest.mark.asyncio
@@ -103,6 +152,19 @@ async def test_lease_release_is_idempotent():
     await first.release()
     await first.release()
 
+    replacement = await leases.acquire("douyin", 1, owner="pipeline:b")
+    await replacement.release()
+
+
+@pytest.mark.asyncio
+async def test_lease_immutable_identity_prevents_original_key_leak():
+    leases = AccountLeaseManager()
+    lease = await leases.acquire("douyin", 1, owner="login:a")
+
+    with pytest.raises(FrozenInstanceError):
+        lease.account_key = "2"
+
+    await lease.release()
     replacement = await leases.acquire("douyin", 1, owner="pipeline:b")
     await replacement.release()
 
@@ -124,6 +186,7 @@ def test_login_session_state_transitions():
     session.transition("waiting_user")
     session.transition("verifying")
     session.transition("persisted")
+    session.authenticated = True
     session.transition("confirmed")
 
     assert session.status == "confirmed"
@@ -162,6 +225,44 @@ def test_login_session_uses_strict_allowed_transitions():
         "expired": set(),
         "cancelled": set(),
     }
+
+
+def test_login_session_invariant_expired_session_cannot_advance():
+    session = LoginSession.new("douyin", "marketing_01")
+    session.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    with pytest.raises(interactive_login.SessionExpiredError):
+        session.transition("waiting_user")
+
+    assert session.status == "expired"
+
+
+def test_login_session_invariant_entering_persisted_sets_flag():
+    session = LoginSession.new("douyin", "marketing_01")
+    session.transition("waiting_user")
+    session.transition("verifying")
+
+    session.transition("persisted")
+
+    assert session.persisted is True
+
+
+def test_login_session_invariant_confirmed_requires_authenticated():
+    session = LoginSession.new("douyin", "marketing_01")
+    session.status = "persisted"
+    session.persisted = True
+
+    with pytest.raises(InvalidLoginTransition):
+        session.transition("confirmed")
+
+
+def test_login_session_invariant_confirmed_requires_persisted():
+    session = LoginSession.new("douyin", "marketing_01")
+    session.status = "persisted"
+    session.authenticated = True
+
+    with pytest.raises(InvalidLoginTransition):
+        session.transition("confirmed")
 
 
 def test_login_session_new_records_initial_state():

@@ -26,6 +26,8 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "cancelled": set(),
 }
 
+_TERMINAL_STATUSES = frozenset({"confirmed", "failed", "expired", "cancelled"})
+
 
 class InvalidLoginTransition(RuntimeError):
     """登录会话尝试了状态机未允许的转移。"""
@@ -36,6 +38,13 @@ class InvalidLoginTransition(RuntimeError):
         super().__init__(
             f"Invalid login session transition: {from_status} -> {to_status}"
         )
+
+
+class SessionExpiredError(RuntimeError):
+    """登录会话已超过允许的交互时间。"""
+
+    def __init__(self) -> None:
+        super().__init__("Login session has expired")
 
 
 @dataclass(slots=True)
@@ -86,9 +95,21 @@ class LoginSession:
         )
 
     def transition(self, next_status: str) -> None:
+        if (
+            self.status not in _TERMINAL_STATUSES
+            and datetime.now(timezone.utc) >= self.expires_at
+        ):
+            self.status = "expired"
+            raise SessionExpiredError()
         if next_status not in ALLOWED_TRANSITIONS.get(self.status, set()):
             raise InvalidLoginTransition(self.status, next_status)
+        if next_status == "confirmed" and not (
+            self.authenticated and self.persisted
+        ):
+            raise InvalidLoginTransition(self.status, next_status)
         self.status = next_status
+        if next_status == "persisted":
+            self.persisted = True
 
 
 def _normalize_alias(account_alias: str) -> str:
