@@ -7,14 +7,25 @@ import { createI18n } from 'vue-i18n'
 import AcquisitionJobCreator from '../components/AcquisitionJobCreator.vue'
 import enUS from '../i18n/en-US'
 import zhCN from '../i18n/zh-CN'
+import Pipeline from './Pipeline.vue'
 
 const api = vi.hoisted(() => ({
+  cancelPipelineJob: vi.fn(),
   createAcquisitionJob: vi.fn(),
   getAccounts: vi.fn(),
+  getPipelineJob: vi.fn(),
   getPipelineCapabilities: vi.fn(),
+  listPipelineJobs: vi.fn(),
+  retryPipelineJob: vi.fn(),
+}))
+
+const messages = vi.hoisted(() => ({
+  error: vi.fn(),
+  success: vi.fn(),
 }))
 
 vi.mock('../api', () => api)
+vi.mock('element-plus', () => ({ ElMessage: messages }))
 
 const capabilities = {
   platforms: {
@@ -408,5 +419,91 @@ describe('AcquisitionJobCreator execution and target profile steps', () => {
     await wrapper.get('[data-testid="acquisition-submit"]').trigger('click')
     await flushPromises()
     expect(api.createAcquisitionJob).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Pipeline acquisition creator integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('replaces the legacy form and selects the newly created job after resetting history', async () => {
+    const oldPayload = {
+      platform: 'douyin',
+      accountMode: 'auto',
+      stages: ['collect'],
+      configSnapshot: {},
+      campaign: {
+        countries: ['CN'],
+        languages: ['zh-CN'],
+        industries: ['旧行业'],
+        products: [],
+        customerRoles: ['采购方'],
+        hardConditions: {},
+        preferenceConditions: {},
+        excludedTargets: [],
+        searchBudget: {},
+        keywordMix: {},
+      },
+      keywords: [{ text: '旧关键词', language: 'zh-CN' }],
+    }
+    const createdPayload = {
+      ...oldPayload,
+      accountMode: 'specified',
+      accountId: 11,
+      campaign: { ...oldPayload.campaign, industries: ['电力基础设施'] },
+      keywords: [{ text: '越南电力项目', language: 'zh-CN' }],
+    }
+    const oldResponse = createJobResponse(oldPayload).data
+    oldResponse.job.id = 'job-old-01'
+    const createdResponse = createJobResponse(createdPayload).data
+
+    api.listPipelineJobs
+      .mockResolvedValueOnce({ data: { items: [oldResponse.job], total: 11, limit: 10, offset: 0 } })
+      .mockResolvedValueOnce({ data: { items: [], total: 11, limit: 10, offset: 10 } })
+      .mockResolvedValue({ data: { items: [createdResponse.job], total: 12, limit: 10, offset: 0 } })
+    api.getPipelineJob.mockImplementation((jobId: string) => Promise.resolve({
+      data: { job: jobId === createdResponse.job.id ? createdResponse.job : oldResponse.job },
+    }))
+
+    const CreatorStub = {
+      name: 'AcquisitionJobCreator',
+      emits: ['accountsLoaded', 'created'],
+      template: '<div data-testid="pipeline-acquisition-creator"></div>',
+    }
+    const i18n = createI18n({
+      legacy: false,
+      locale: 'zh-CN',
+      fallbackLocale: 'zh-CN',
+      messages: { 'zh-CN': zhCN, 'en-US': enUS },
+    })
+    const wrapper = mount(Pipeline, {
+      global: {
+        plugins: [i18n],
+        stubs: { AcquisitionJobCreator: CreatorStub },
+        mocks: { $router: { push: vi.fn() } },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="pipeline-acquisition-creator"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="pipeline-platform-douyin"]').exists()).toBe(false)
+
+    await wrapper.get('.history-footer button:last-child').trigger('click')
+    await flushPromises()
+    expect(api.listPipelineJobs).toHaveBeenLastCalledWith({ limit: 10, offset: 10 })
+
+    const creator = wrapper.getComponent({ name: 'AcquisitionJobCreator' })
+    creator.vm.$emit('accountsLoaded', accounts)
+    creator.vm.$emit('created', createdResponse)
+    await flushPromises()
+
+    expect(api.listPipelineJobs).toHaveBeenLastCalledWith({ limit: 10, offset: 0 })
+    expect(api.getPipelineJob).toHaveBeenLastCalledWith('job-locked-01')
+    expect(wrapper.text()).toContain('job-locked-01')
+    expect(wrapper.text()).toContain('@douyin_sales')
+    expect(messages.success).toHaveBeenCalledOnce()
+
+    wrapper.unmount()
   })
 })

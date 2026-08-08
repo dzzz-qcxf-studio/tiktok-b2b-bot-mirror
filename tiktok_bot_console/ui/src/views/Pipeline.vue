@@ -11,193 +11,11 @@
       </button>
     </div>
 
-    <section class="card creator-card">
-      <div class="card-hd creator-head">
-        <div>
-          <h3>{{ $t('pipeline.createTitle') }}</h3>
-          <span class="hint">{{ $t('pipeline.createHint') }}</span>
-        </div>
-        <span class="system-mark">{{ $t('pipeline.singleSystem') }}</span>
-      </div>
-
-      <div class="creator-body">
-        <div class="choice-grid">
-          <div class="field-block">
-            <span class="label">{{ $t('pipeline.platform') }}</span>
-            <div class="segmented" role="radiogroup" :aria-label="$t('pipeline.platform')">
-              <button
-                ref="tiktokPlatformRadio"
-                data-testid="pipeline-platform-tiktok"
-                type="button"
-                role="radio"
-                :class="{ active: selectedPlatform === 'tiktok' }"
-                :aria-checked="selectedPlatform === 'tiktok'"
-                :tabindex="selectedPlatform === 'tiktok' ? 0 : -1"
-                @click="selectPlatform('tiktok')"
-                @keydown.left.prevent="selectPlatform('douyin', true)"
-                @keydown.right.prevent="selectPlatform('douyin', true)"
-              >
-                <span class="platform-code">TT</span>
-                TikTok
-              </button>
-              <button
-                ref="douyinPlatformRadio"
-                data-testid="pipeline-platform-douyin"
-                type="button"
-                role="radio"
-                :class="{ active: selectedPlatform === 'douyin' }"
-                :aria-checked="selectedPlatform === 'douyin'"
-                :tabindex="selectedPlatform === 'douyin' ? 0 : -1"
-                @click="selectPlatform('douyin')"
-                @keydown.left.prevent="selectPlatform('tiktok', true)"
-                @keydown.right.prevent="selectPlatform('tiktok', true)"
-              >
-                <span class="platform-code">DY</span>
-                {{ $t('pipeline.douyin') }}
-              </button>
-            </div>
-          </div>
-
-          <div class="field-block">
-            <span class="label">{{ $t('pipeline.accountStrategy') }}</span>
-            <div class="segmented compact" role="radiogroup" :aria-label="$t('pipeline.accountStrategy')">
-              <button
-                ref="autoAccountRadio"
-                data-testid="pipeline-account-auto"
-                type="button"
-                role="radio"
-                :class="{ active: accountMode === 'auto' }"
-                :aria-checked="accountMode === 'auto'"
-                :tabindex="accountMode === 'auto' ? 0 : -1"
-                @click="selectAccountMode('auto')"
-                @keydown.left.prevent="selectAccountMode('specified', true)"
-                @keydown.right.prevent="selectAccountMode('specified', true)"
-              >
-                {{ $t('pipeline.accountAuto') }}
-              </button>
-              <button
-                ref="specifiedAccountRadio"
-                data-testid="pipeline-account-specified"
-                type="button"
-                role="radio"
-                :class="{ active: accountMode === 'specified' }"
-                :aria-checked="accountMode === 'specified'"
-                :tabindex="accountMode === 'specified' ? 0 : -1"
-                @click="selectAccountMode('specified')"
-                @keydown.left.prevent="selectAccountMode('auto', true)"
-                @keydown.right.prevent="selectAccountMode('auto', true)"
-              >
-                {{ $t('pipeline.accountSpecified') }}
-              </button>
-            </div>
-          </div>
-
-          <div v-if="accountMode === 'specified'" class="field-block account-field">
-            <label class="label" for="pipeline-account">{{ $t('pipeline.account') }}</label>
-            <select
-              id="pipeline-account"
-              v-model.number="selectedAccountId"
-              data-testid="pipeline-account-select"
-              class="select"
-              :disabled="accountsLoading"
-            >
-              <option :value="null">{{ accountsLoading ? $t('common.loading') : $t('pipeline.selectAccount') }}</option>
-              <option v-for="account in loggedInAccounts" :key="account.id" :value="account.id">
-                {{ account.nickname || account.username }} · @{{ account.username }}
-              </option>
-            </select>
-          </div>
-        </div>
-
-        <div
-          v-if="capabilitiesLoading"
-          class="preflight neutral"
-          role="status"
-        >
-          <span class="preflight-signal"></span>
-          {{ $t('pipeline.checkingCapability') }}
-        </div>
-        <div
-          v-else-if="capabilitiesError"
-          class="preflight blocked"
-          role="alert"
-        >
-          <span class="preflight-signal"></span>
-          <div>
-            <strong>{{ $t('pipeline.capabilityError') }}</strong>
-            <span>{{ capabilitiesError }}</span>
-          </div>
-          <button class="text-action" type="button" @click="loadCapabilities">{{ $t('common.retry') }}</button>
-        </div>
-        <div
-          v-else-if="capability"
-          :class="['preflight', capability.available ? 'ready' : 'blocked']"
-          :role="capability.available ? 'status' : 'alert'"
-        >
-          <span class="preflight-signal"></span>
-          <div>
-            <strong>
-              {{ capability.available ? $t('pipeline.preflightReady') : $t('pipeline.preflightBlocked') }}
-            </strong>
-            <span v-if="!capability.available && capability.message">
-              {{ capability.message }}
-            </span>
-            <span v-else-if="selectedPlatform === 'douyin'">
-              {{ $t('pipeline.douyinConcurrency', { n: capability.maxConcurrency }) }}
-              · {{ $t('pipeline.loggedInAccounts', { n: capability.accountCount }) }}
-            </span>
-            <span v-else-if="capability.message">{{ capability.message }}</span>
-          </div>
-          <code v-if="capability.code">{{ capability.code }}</code>
-          <span v-else class="provider-name">{{ capability.provider }}</span>
-        </div>
-
-        <p v-if="accountsError" class="inline-error" role="alert">{{ accountsError }}</p>
-        <p v-else-if="accountMode === 'specified' && !accountsLoading && loggedInAccounts.length === 0" class="inline-error">
-          {{ $t('pipeline.noLoggedInAccounts') }}
-        </p>
-
-        <div class="stage-picker">
-          <div class="stage-picker-head">
-            <div>
-              <span class="label">{{ $t('pipeline.stages') }}</span>
-              <span class="hint">{{ $t('pipeline.stageSelectionHint') }}</span>
-            </div>
-            <button class="text-action" type="button" @click="toggleAllStages">
-              {{ allStagesSelected ? $t('pipeline.clearAll') : $t('pipeline.selectAll') }}
-            </button>
-          </div>
-          <div class="stage-options">
-            <label
-              v-for="(stage, index) in ALL_STAGES"
-              :key="stage"
-              :class="['stage-option', { selected: selectedStages.includes(stage) }]"
-            >
-              <input v-model="selectedStages" type="checkbox" :value="stage">
-              <span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span>
-              <span>
-                <b>{{ $t(`pipeline.${stage}`) }}</b>
-                <small>{{ $t(`pipeline.${stage}Short`) }}</small>
-              </span>
-            </label>
-          </div>
-        </div>
-
-        <div class="creator-footer">
-          <p>{{ submitHint }}</p>
-          <button
-            class="btn brand lg"
-            type="button"
-            :disabled="!canCreate"
-            @click="submitJob"
-          >
-            <span v-if="createLoading" class="spinner"></span>
-            {{ createLoading ? $t('pipeline.creating') : $t('pipeline.createJob') }}
-          </button>
-        </div>
-      </div>
-    </section>
-
+    <AcquisitionJobCreator
+      class="acquisition-creator-shell"
+      @accounts-loaded="handleAccountsLoaded"
+      @created="handleAcquisitionCreated"
+    />
     <div class="console-grid">
       <section class="card history-card">
         <div class="card-hd">
@@ -402,27 +220,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import {
   cancelPipelineJob,
-  createPipelineJob,
-  getAccounts,
-  getPipelineCapabilities,
   getPipelineJob,
   listPipelineJobs,
   retryPipelineJob,
 } from '../api'
 import type {
-  AccountMode,
-  PipelineCapabilities,
+  CreateAcquisitionJobResponse,
   PipelineJob,
   PipelineJobStatus,
   PipelinePlatform,
   PipelineStage,
   PipelineStageName,
 } from '../types/pipeline'
+import AcquisitionJobCreator from '../components/AcquisitionJobCreator.vue'
 
 interface SocialAccount {
   id: number
@@ -445,21 +260,7 @@ const JOB_STATUSES: PipelineJobStatus[] = [
   'cancelled',
 ]
 const PAGE_SIZE = 10
-const selectedPlatform = ref<PipelinePlatform>('douyin')
-const accountMode = ref<AccountMode>('auto')
-const selectedAccountId = ref<number | null>(null)
-const selectedStages = ref<PipelineStageName[]>([...ALL_STAGES])
-const tiktokPlatformRadio = ref<HTMLButtonElement | null>(null)
-const douyinPlatformRadio = ref<HTMLButtonElement | null>(null)
-const autoAccountRadio = ref<HTMLButtonElement | null>(null)
-const specifiedAccountRadio = ref<HTMLButtonElement | null>(null)
 const accounts = ref<SocialAccount[]>([])
-const accountsLoading = ref(false)
-const accountsError = ref('')
-const capabilities = ref<PipelineCapabilities | null>(null)
-const capabilitiesLoading = ref(false)
-const capabilitiesError = ref('')
-const createLoading = ref(false)
 const jobs = ref<PipelineJob[]>([])
 const historyLoading = ref(false)
 const historyError = ref('')
@@ -471,43 +272,11 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const actionLoading = ref(false)
 let pollTimer: number | null = null
-let accountsRequestToken = 0
 let historyRequestToken = 0
 let detailRequestToken = 0
 let actionRequestToken = 0
 let pollInFlight = false
 
-const capability = computed(() => capabilities.value?.platforms[selectedPlatform.value] || null)
-const loggedInAccounts = computed(() =>
-  accounts.value.filter(account =>
-    account.platform === selectedPlatform.value && account.status === 'logged_in',
-  ),
-)
-const allStagesSelected = computed(() => selectedStages.value.length === ALL_STAGES.length)
-const selectedAccountIsValid = computed(() =>
-  selectedAccountId.value !== null
-  && loggedInAccounts.value.some(account => account.id === selectedAccountId.value),
-)
-const canCreate = computed(() =>
-  !createLoading.value
-  && !capabilitiesLoading.value
-  && Boolean(capability.value?.available)
-  && selectedStages.value.length > 0
-  && loggedInAccounts.value.length > 0
-  && (accountMode.value === 'auto' || selectedAccountIsValid.value),
-)
-const submitHint = computed(() => {
-  if (!capability.value?.available) return t('pipeline.submitBlocked')
-  if (selectedStages.value.length === 0) return t('pipeline.submitNeedStage')
-  if (loggedInAccounts.value.length === 0) return t('pipeline.submitNeedAvailableAccount')
-  if (accountMode.value === 'specified' && !selectedAccountIsValid.value) {
-    return t('pipeline.submitNeedAccount')
-  }
-  return t('pipeline.submitReady', {
-    platform: selectedPlatform.value === 'tiktok' ? 'TikTok' : t('pipeline.douyin'),
-    n: selectedStages.value.length,
-  })
-})
 const canCancel = computed(() =>
   Boolean(selectedJob.value && ['queued', 'running'].includes(selectedJob.value.status)),
 )
@@ -538,46 +307,6 @@ const stageProgressText = computed(() => {
   return t('pipeline.stageProgressCount', { done: completed, total: detailStages.value.length })
 })
 
-watch(selectedPlatform, async () => {
-  selectedAccountId.value = null
-  await loadAccounts()
-})
-watch(accountMode, mode => {
-  if (mode === 'auto') selectedAccountId.value = null
-})
-watch(loggedInAccounts, availableAccounts => {
-  if (
-    selectedAccountId.value !== null
-    && !availableAccounts.some(account => account.id === selectedAccountId.value)
-  ) {
-    selectedAccountId.value = null
-  }
-})
-
-function selectPlatform(platform: PipelinePlatform, focus = false) {
-  selectedPlatform.value = platform
-  if (focus) {
-    nextTick(() => {
-      const target = platform === 'tiktok' ? tiktokPlatformRadio.value : douyinPlatformRadio.value
-      target?.focus()
-    })
-  }
-}
-
-function selectAccountMode(mode: AccountMode, focus = false) {
-  accountMode.value = mode
-  if (focus) {
-    nextTick(() => {
-      const target = mode === 'auto' ? autoAccountRadio.value : specifiedAccountRadio.value
-      target?.focus()
-    })
-  }
-}
-
-function toggleAllStages() {
-  selectedStages.value = allStagesSelected.value ? [] : [...ALL_STAGES]
-}
-
 function extractError(error: unknown, fallback: string) {
   const candidate = error as {
     message?: string
@@ -592,61 +321,17 @@ function extractError(error: unknown, fallback: string) {
   return candidate?.message || fallback
 }
 
-async function loadCapabilities() {
-  capabilitiesLoading.value = true
-  capabilitiesError.value = ''
-  try {
-    const { data } = await getPipelineCapabilities()
-    capabilities.value = data
-  } catch (error) {
-    capabilitiesError.value = extractError(error, t('pipeline.capabilityError'))
-  } finally {
-    capabilitiesLoading.value = false
-  }
+function handleAccountsLoaded(loadedAccounts: SocialAccount[]) {
+  const byId = new Map(accounts.value.map(account => [account.id, account]))
+  loadedAccounts.forEach(account => byId.set(account.id, account))
+  accounts.value = [...byId.values()]
 }
 
-async function loadAccounts() {
-  const requestToken = ++accountsRequestToken
-  const platformSnapshot = selectedPlatform.value
-  accountsLoading.value = true
-  accountsError.value = ''
-  try {
-    const { data } = await getAccounts(platformSnapshot)
-    if (requestToken !== accountsRequestToken || platformSnapshot !== selectedPlatform.value) return
-    accounts.value = Array.isArray(data) ? data : []
-    if (!loggedInAccounts.value.some(account => account.id === selectedAccountId.value)) {
-      selectedAccountId.value = null
-    }
-  } catch (error) {
-    if (requestToken !== accountsRequestToken || platformSnapshot !== selectedPlatform.value) return
-    accounts.value = []
-    accountsError.value = extractError(error, t('pipeline.accountsError'))
-  } finally {
-    if (requestToken === accountsRequestToken && platformSnapshot === selectedPlatform.value) {
-      accountsLoading.value = false
-    }
-  }
-}
-
-async function submitJob() {
-  if (!canCreate.value) return
-  createLoading.value = true
-  try {
-    const { data } = await createPipelineJob({
-      platform: selectedPlatform.value,
-      accountMode: accountMode.value,
-      accountId: selectedAccountId.value,
-      stages: [...selectedStages.value],
-    })
-    ElMessage.success(t('pipeline.createdMessage'))
-    historyOffset.value = 0
-    await refreshJobs(false)
-    await selectJob(data.job)
-  } catch (error) {
-    ElMessage.error(extractError(error, t('pipeline.createError')))
-  } finally {
-    createLoading.value = false
-  }
+async function handleAcquisitionCreated(response: CreateAcquisitionJobResponse) {
+  ElMessage.success(t('pipeline.createdMessage'))
+  historyOffset.value = 0
+  await refreshJobs(false)
+  await selectJob(response.job)
 }
 
 async function refreshJobs(showLoading = true) {
@@ -841,13 +526,12 @@ async function pollActiveJob() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadCapabilities(), loadAccounts(), refreshJobs()])
+  await refreshJobs()
   pollTimer = window.setInterval(pollActiveJob, 5000)
 })
 
 onUnmounted(() => {
   if (pollTimer !== null) window.clearInterval(pollTimer)
-  ++accountsRequestToken
   ++historyRequestToken
   ++detailRequestToken
   ++actionRequestToken
@@ -863,83 +547,7 @@ onUnmounted(() => {
 }
 .page-head h1 { font-size: 25px; }
 .page-head p { max-width: 720px; text-wrap: pretty; }
-.creator-card { margin-bottom: 16px; overflow: hidden; }
-.creator-head { background: var(--surface-2); }
-.system-mark {
-  padding: 4px 9px; border: 1px solid var(--border-strong); border-radius: 5px;
-  color: var(--fg-2); font-family: var(--font-mono); font-size: 10px; letter-spacing: .05em;
-}
-.creator-body { padding: 18px; }
-.choice-grid {
-  display: grid; grid-template-columns: minmax(260px, 1fr) minmax(230px, .8fr) minmax(260px, 1fr);
-  gap: 18px; align-items: end;
-}
-.field-block { min-width: 0; }
-.account-field { grid-column: auto; }
-.segmented {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; padding: 3px;
-  height: 42px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-sub);
-}
-.segmented button {
-  display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0;
-  border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12.5px;
-}
-.segmented button:hover { color: var(--fg); background: var(--surface-2); }
-.segmented button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-.segmented button.active {
-  background: var(--surface); color: var(--fg); box-shadow: var(--shadow-1); font-weight: 600;
-}
-.platform-code {
-  display: inline-grid; place-items: center; width: 24px; height: 20px; border-radius: 4px;
-  background: var(--fg); color: var(--surface); font-family: var(--font-mono); font-size: 9px;
-}
-.segmented button.active .platform-code { background: var(--brand); }
-.select { height: 42px; }
-.preflight {
-  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
-  margin-top: 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px;
-  color: var(--fg-2); font-size: 12px;
-}
-.preflight > div { display: flex; gap: 6px; min-width: 0; }
-.preflight strong { color: var(--fg); }
-.preflight-signal { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-2); }
-.preflight.ready { background: var(--ok-soft); border-color: oklch(88% .05 150); }
-.preflight.ready .preflight-signal { background: var(--ok); }
-.preflight.blocked { background: var(--err-soft); border-color: oklch(88% .06 25); }
-.preflight.blocked .preflight-signal { background: var(--err); }
-.preflight code, .provider-name {
-  overflow: hidden; color: inherit; font-family: var(--font-mono); font-size: 10.5px; text-overflow: ellipsis;
-}
-.inline-error { margin: 8px 0 0; color: var(--err); font-size: 11.5px; }
-.stage-picker { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
-.stage-picker-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.stage-picker-head .hint { display: block; margin-top: 1px; }
-.text-action {
-  padding: 0; border: 0; background: transparent; color: var(--brand-deep); font-size: 11.5px; font-weight: 600;
-}
-.text-action:hover { text-decoration: underline; }
-.stage-options { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; margin-top: 10px; }
-.stage-option {
-  position: relative; display: flex; align-items: center; gap: 9px; min-width: 0;
-  padding: 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
-  color: var(--muted); cursor: pointer; transition: border-color .12s, background .12s, transform .12s;
-}
-.stage-option:hover { border-color: var(--border-strong); transform: translateY(-1px); }
-.stage-option.selected { border-color: oklch(86% .08 350); background: var(--brand-soft); color: var(--fg); }
-.stage-option input { position: absolute; opacity: 0; pointer-events: none; }
-.stage-number {
-  color: var(--muted-2); font-family: var(--font-mono); font-size: 10px; font-weight: 700;
-}
-.stage-option b { display: block; font-size: 12px; line-height: 1.3; }
-.stage-option small {
-  display: block; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.creator-footer {
-  display: flex; align-items: center; justify-content: space-between; gap: 18px;
-  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
-}
-.creator-footer p { margin: 0; color: var(--muted); font-size: 11.5px; }
+.acquisition-creator-shell { margin-bottom: 16px; }
 .btn:disabled, .icon-action:disabled { cursor: not-allowed; opacity: .45; }
 .console-grid { display: grid; grid-template-columns: minmax(290px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .history-card { overflow: hidden; }
@@ -1070,9 +678,6 @@ onUnmounted(() => {
 @keyframes pulse { 50% { opacity: .35; } }
 
 @media (max-width: 1120px) {
-  .choice-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .account-field { grid-column: 1 / -1; }
-  .stage-options { grid-template-columns: repeat(3, 1fr); }
   .console-grid { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); }
   .detail-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .detail-meta > div:nth-child(2) { border-right: 0; }
@@ -1080,20 +685,14 @@ onUnmounted(() => {
 }
 @media (max-width: 820px) {
   .page-head { align-items: flex-start; }
-  .choice-grid, .console-grid { grid-template-columns: 1fr; }
-  .account-field { grid-column: auto; }
+  .console-grid { grid-template-columns: 1fr; }
   .history-card { order: 2; }
   .detail-card { order: 1; }
   .job-list { max-height: 340px; }
 }
 @media (max-width: 580px) {
-  .page-head, .creator-footer, .detail-head { align-items: stretch; flex-direction: column; }
-  .page-head .btn, .creator-footer .btn { justify-content: center; width: 100%; }
-  .creator-body { padding: 14px; }
-  .stage-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .preflight { grid-template-columns: auto 1fr; }
-  .preflight code, .provider-name { grid-column: 2; }
-  .preflight > div { flex-direction: column; gap: 0; }
+  .page-head, .detail-head { align-items: stretch; flex-direction: column; }
+  .page-head .btn { justify-content: center; width: 100%; }
   .detail-title-row h2 { max-width: calc(100vw - 150px); }
   .detail-actions { width: 100%; }
   .detail-actions .btn { flex: 1; justify-content: center; }
