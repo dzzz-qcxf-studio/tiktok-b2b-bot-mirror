@@ -449,6 +449,7 @@ group('unified pipeline page contract')
 
 const pipelineViewSrc = readFileSync(join(root, 'src', 'views', 'Pipeline.vue'), 'utf8')
 const appShellSrc = readFileSync(join(root, 'src', 'App.vue'), 'utf8')
+const mobileShellSrc = appShellSrc.slice(appShellSrc.indexOf('@media (max-width: 700px)'))
 const acquisitionCreatorSrc = readFileSync(
   join(root, 'src', 'components', 'AcquisitionJobCreator.vue'),
   'utf8',
@@ -471,7 +472,7 @@ const pipelineViewChecks = [
   ['job actions preserve a newer selection', pipelineViewSrc.includes('const targetId = selectedJob.value.id') && pipelineViewSrc.includes('selectedJobId.value === targetId') && pipelineViewSrc.includes('actionRequestToken')],
   ['account validity gates job creation', acquisitionCreatorSrc.includes('loggedInAccounts.value.length === 0') && acquisitionCreatorSrc.includes('draft.value.accountId = null') && acquisitionCreatorSrc.includes("code: 'account_required'")],
   ['segmented controls expose keyboard radio semantics', acquisitionCreatorSrc.includes('role="radio"') && acquisitionCreatorSrc.includes(':aria-checked=') && acquisitionCreatorSrc.includes('@keydown.left') && acquisitionCreatorSrc.includes('@keydown.right')],
-  ['mobile shell releases content width and keeps navigation', appShellSrc.includes('@media (max-width: 700px)') && appShellSrc.includes('inset: auto 0 0;') && appShellSrc.includes('overflow-x: auto;') && appShellSrc.includes('padding-bottom: calc(64px + env(safe-area-inset-bottom));')],
+  ['mobile shell releases content width and keeps navigation', mobileShellSrc.includes('inset: auto 0 0;') && mobileShellSrc.includes('overflow-x: auto;') && mobileShellSrc.includes('padding-bottom: calc(64px + env(safe-area-inset-bottom));') && /\.sb-foot\s*\{[\s\S]{0,260}display:\s*flex/.test(mobileShellSrc) && /\.sb-foot \.logout-btn\s*\{[\s\S]{0,180}min-height:\s*54px/.test(mobileShellSrc)],
 ]
 
 for (const [label, condition] of pipelineViewChecks) {

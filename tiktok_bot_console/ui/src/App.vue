@@ -307,9 +307,39 @@ const crumbCurrent = computed(() => {
   }
 
   .sb-brand,
-  .sb-section,
-  .sb-foot {
+  .sb-section {
     display: none;
+  }
+
+  .sb-foot {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: stretch;
+    padding: 5px 4px;
+    border-top: 0;
+    border-left: 1px solid var(--sb-border);
+    background: var(--sb-bg);
+  }
+
+  .sb-foot .user {
+    display: none;
+  }
+
+  .sb-foot .logout-btn {
+    min-width: 62px;
+    min-height: 54px;
+    padding: 5px 6px;
+    border-radius: 6px;
+    color: var(--sb-fg);
+    font-size: 10px;
+  }
+
+  .sb-foot .logout-btn:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: -2px;
   }
 
   .sb-nav {
