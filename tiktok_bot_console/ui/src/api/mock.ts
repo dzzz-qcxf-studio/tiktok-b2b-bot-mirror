@@ -4,6 +4,18 @@
  * (`{ data: ... }`) so call sites do not need to change.
  */
 
+import type {
+  CreatePipelineJobPayload,
+  PipelineJob,
+  PipelineJobListParams,
+  PipelineSchedule,
+  PipelineSchedulePayload,
+  PipelineStage,
+  PipelineStageName,
+  PipelineRuntimeConfigPayload,
+  PipelineRuntimeConfigResponse,
+} from '../types/pipeline'
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 // ---- Mock dataset --------------------------------------------------------
@@ -63,18 +75,82 @@ const MOCK_WORDCLOUD_CN = [
   { word: '零售',         count: 19  },
 ]
 
-const MOCK_USERS = [
-  { id: 1, tiktok_id: 'aroma_house_us', username: 'aroma_house_us', nickname: 'Aroma House US', bio: 'Wholesale essential oils · Importer based in TX · DM open', follower_count: 128400, following_count: 412, like_count: 2100000, video_count: 412, country: 'US', category: 'distributor', status: 'replied', source: 'keyword_search', source_keyword: 'importer 1688', created_at: '2026-06-18T09:18:00', updated_at: '2026-07-11T12:04:00' },
-  { id: 2, tiktok_id: 'led_wholesale_uk', username: 'led_wholesale_uk', nickname: 'LED Wholesale UK', bio: 'LED lighting distributor · bulk pricing for retailers', follower_count: 56200, following_count: 89, like_count: 421000, video_count: 87, country: 'GB', category: 'distributor', status: 'qualified', source: 'keyword_search', source_keyword: 'wholesale LED', created_at: '2026-06-19T10:00:00', updated_at: '2026-07-10T14:22:00' },
-  { id: 3, tiktok_id: 'korean_beauty_hub', username: 'korean_beauty_hub', nickname: 'K-Beauty Hub', bio: 'K-beauty sourcing for US/EU · Brand collabs welcome', follower_count: 214700, following_count: 312, like_count: 1860000, video_count: 218, country: 'KR', category: 'buyer', status: 'contacted', source: 'recommendation', source_keyword: '', created_at: '2026-06-20T08:30:00', updated_at: '2026-07-11T11:58:00' },
-  { id: 4, tiktok_id: 'sourcing_brothers_de', username: 'sourcing_brothers_de', nickname: 'Sourcing Brothers', bio: 'Berlin · Agent for European brands sourcing from Asia', follower_count: 38100, following_count: 156, like_count: 198000, video_count: 64, country: 'DE', category: 'buyer', status: 'qualified', source: 'keyword_search', source_keyword: 'sourcing agent', created_at: '2026-06-21T14:15:00', updated_at: '2026-07-09T16:08:00' },
-  { id: 5, tiktok_id: 'factory_direct_cn', username: 'factory_direct_cn', nickname: 'Factory Direct CN', bio: 'Factory direct · OEM/ODM · 电子产品 17年', follower_count: 8600, following_count: 23, like_count: 24000, video_count: 18, country: 'CN', category: 'peer', status: 'rejected', source: 'recommendation', source_keyword: '', created_at: '2026-06-22T11:42:00', updated_at: '2026-07-09T11:42:00' },
-  { id: 6, tiktok_id: 'maison_zara_fr', username: 'maison_zara_fr', nickname: 'Maison Zara FR', bio: 'Boutique mode · cherche fournisseur textile MOQ 200', follower_count: 12300, following_count: 78, like_count: 89000, video_count: 32, country: 'FR', category: 'buyer', status: 'pending', source: 'keyword_search', source_keyword: 'bulk buy China', created_at: '2026-06-23T09:00:00', updated_at: '2026-07-11T10:30:00' },
-  { id: 7, tiktok_id: 'tech_retailer_ph', username: 'tech_retailer_ph', nickname: 'Tech Retailer PH', bio: 'Tech retail · 50 stores nationwide · open for OEM deals', follower_count: 76800, following_count: 234, like_count: 412000, video_count: 156, country: 'PH', category: 'distributor', status: 'qualified', source: 'keyword_search', source_keyword: 'sourcing agent', created_at: '2026-06-24T15:30:00', updated_at: '2026-07-10T11:30:00' },
-  { id: 8, tiktok_id: 'brazil_import_br', username: 'brazil_import_br', nickname: 'Brazil Import', bio: 'Import electronics from China · 8 anos no mercado', follower_count: 42100, following_count: 189, like_count: 256000, video_count: 92, country: 'BR', category: 'distributor', status: 'pending', source: 'keyword_search', source_keyword: 'importer 1688', created_at: '2026-06-25T13:20:00', updated_at: '2026-07-09T15:00:00' },
-  { id: 9, tiktok_id: 'japan_craft_tokyo', username: 'japan_craft_tokyo', nickname: 'Japan Craft', bio: 'Tokyo · Specialty importer of EU/US lifestyle goods', follower_count: 34500, following_count: 67, like_count: 178000, video_count: 45, country: 'JP', category: 'buyer', status: 'qualified', source: 'keyword_search', source_keyword: 'retail dropship', created_at: '2026-06-26T17:00:00', updated_at: '2026-07-09T17:00:00' },
-  { id: 10, tiktok_id: 'india_wholesale_in', username: 'india_wholesale_in', nickname: 'India Wholesale', bio: 'Mumbai · Wholesale distributor · D2C brand sourcing', follower_count: 67200, following_count: 201, like_count: 380000, video_count: 124, country: 'IN', category: 'distributor', status: 'contacted', source: 'recommendation', source_keyword: '', created_at: '2026-06-27T12:30:00', updated_at: '2026-07-10T16:00:00' },
+const buildProfileUrl = (platform: string | undefined, username: string) => {
+  const u = (username || '').replace(/^@/, '').trim()
+  if (!u) return ''
+  const p = (platform || 'tiktok').toLowerCase()
+  if (p === 'tiktok') return `https://www.tiktok.com/@${u}`
+  if (p === 'douyin') return `https://www.douyin.com/user/${u}`
+  return ''
+}
+
+const MOCK_USERS: any[] = [
+  { id: 1, tiktok_id: 'aroma_house_us', platform: 'tiktok', username: 'aroma_house_us', nickname: 'Aroma House US', bio: 'Wholesale essential oils · Importer based in TX · DM open', follower_count: 128400, following_count: 412, like_count: 2100000, video_count: 412, country: 'US', category: 'distributor', status: 'replied', source: 'keyword_search', source_keyword: 'importer 1688', created_at: '2026-06-18T09:18:00', updated_at: '2026-07-11T12:04:00' },
+  { id: 2, tiktok_id: 'led_wholesale_uk', platform: 'tiktok', username: 'led_wholesale_uk', nickname: 'LED Wholesale UK', bio: 'LED lighting distributor · bulk pricing for retailers', follower_count: 56200, following_count: 89, like_count: 421000, video_count: 87, country: 'GB', category: 'distributor', status: 'qualified', source: 'keyword_search', source_keyword: 'wholesale LED', created_at: '2026-06-19T10:00:00', updated_at: '2026-07-10T14:22:00' },
+  { id: 3, tiktok_id: 'korean_beauty_hub', platform: 'tiktok', username: 'korean_beauty_hub', nickname: 'K-Beauty Hub', bio: 'K-beauty sourcing for US/EU · Brand collabs welcome', follower_count: 214700, following_count: 312, like_count: 1860000, video_count: 218, country: 'KR', category: 'buyer', status: 'contacted', source: 'recommendation', source_keyword: '', created_at: '2026-06-20T08:30:00', updated_at: '2026-07-11T11:58:00' },
+  { id: 4, tiktok_id: 'sourcing_brothers_de', platform: 'tiktok', username: 'sourcing_brothers_de', nickname: 'Sourcing Brothers', bio: 'Berlin · Agent for European brands sourcing from Asia', follower_count: 38100, following_count: 156, like_count: 198000, video_count: 64, country: 'DE', category: 'buyer', status: 'qualified', source: 'keyword_search', source_keyword: 'sourcing agent', created_at: '2026-06-21T14:15:00', updated_at: '2026-07-09T16:08:00' },
+  { id: 5, tiktok_id: 'factory_direct_cn', platform: 'douyin', username: 'factory_direct_cn', nickname: 'Factory Direct CN', bio: 'Factory direct · OEM/ODM · 电子产品 17年', follower_count: 8600, following_count: 23, like_count: 24000, video_count: 18, country: 'CN', category: 'peer', status: 'rejected', source: 'recommendation', source_keyword: '', created_at: '2026-06-22T11:42:00', updated_at: '2026-07-09T11:42:00' },
+  { id: 6, tiktok_id: 'maison_zara_fr', platform: 'tiktok', username: 'maison_zara_fr', nickname: 'Maison Zara FR', bio: 'Boutique mode · cherche fournisseur textile MOQ 200', follower_count: 12300, following_count: 78, like_count: 89000, video_count: 32, country: 'FR', category: 'buyer', status: 'pending', source: 'keyword_search', source_keyword: 'bulk buy China', created_at: '2026-06-23T09:00:00', updated_at: '2026-07-11T10:30:00' },
+  { id: 7, tiktok_id: 'tech_retailer_ph', platform: 'tiktok', username: 'tech_retailer_ph', nickname: 'Tech Retailer PH', bio: 'Tech retail · 50 stores nationwide · open for OEM deals', follower_count: 76800, following_count: 234, like_count: 412000, video_count: 156, country: 'PH', category: 'distributor', status: 'qualified', source: 'keyword_search', source_keyword: 'sourcing agent', created_at: '2026-06-24T15:30:00', updated_at: '2026-07-10T11:30:00' },
+  { id: 8, tiktok_id: 'brazil_import_br', platform: 'tiktok', username: 'brazil_import_br', nickname: 'Brazil Import', bio: 'Import electronics from China · 8 anos no mercado', follower_count: 42100, following_count: 189, like_count: 256000, video_count: 92, country: 'BR', category: 'distributor', status: 'pending', source: 'keyword_search', source_keyword: 'importer 1688', created_at: '2026-06-25T13:20:00', updated_at: '2026-07-09T15:00:00' },
+  { id: 9, tiktok_id: 'japan_craft_tokyo', platform: 'tiktok', username: 'japan_craft_tokyo', nickname: 'Japan Craft', bio: 'Tokyo · Specialty importer of EU/US lifestyle goods', follower_count: 34500, following_count: 67, like_count: 178000, video_count: 45, country: 'JP', category: 'buyer', status: 'qualified', source: 'keyword_search', source_keyword: 'retail dropship', created_at: '2026-06-26T17:00:00', updated_at: '2026-07-09T17:00:00' },
+  { id: 10, tiktok_id: 'india_wholesale_in', platform: 'tiktok', username: 'india_wholesale_in', nickname: 'India Wholesale', bio: 'Mumbai · Wholesale distributor · D2C brand sourcing', follower_count: 67200, following_count: 201, like_count: 380000, video_count: 124, country: 'IN', category: 'distributor', status: 'contacted', source: 'recommendation', source_keyword: '', created_at: '2026-06-27T12:30:00', updated_at: '2026-07-10T16:00:00' },
 ]
+
+/** 程序化生成 1237 条额外 mock 用户(补到 1247),让列表分页 / 筛选 /
+ *  关键词搜索 demo 时数据量与 MOCK_DASHBOARD.overview.total_users (1247) 自洽。
+ *  数据按状态分布加权:replied < qualified < contacted < rejected < pending,
+ *  与真实后端 /api/users/stats 的典型分布一致。 */
+const MOCK_USER_COUNT = 1247
+const COUNTRIES = ['US', 'GB', 'KR', 'DE', 'CN', 'FR', 'PH', 'BR', 'JP', 'IN', 'VN', 'TH', 'AU', 'CA', 'MX', 'IT', 'ES', 'NL', 'PL', 'TR']
+const CATEGORIES = ['distributor', 'buyer', 'peer']
+const STATUSES = ['pending', 'pending', 'pending', 'pending', 'qualified', 'qualified', 'qualified', 'contacted', 'contacted', 'replied', 'rejected', 'rejected']
+const SOURCES = ['keyword_search', 'keyword_search', 'keyword_search', 'recommendation', 'competitor']
+const KEYWORDS = ['importer 1688', 'wholesale LED', 'sourcing agent', 'bulk buy China', 'retail dropship', 'factory direct', 'OEM partner', 'B2B sourcing', 'private label', 'distributor wanted']
+const NICHE_PREFIX = ['aroma', 'led', 'korean_beauty', 'sourcing', 'factory', 'maison', 'tech', 'brazil', 'japan', 'india', 'global', 'pacific', 'euro', 'asia', 'metro', 'urban', 'eco', 'pure', 'natural', 'smart']
+
+function pad(n: number) { return String(n).padStart(2, '0') }
+
+for (let i = MOCK_USERS.length + 1; i <= MOCK_USER_COUNT; i++) {
+  const country = COUNTRIES[(i * 7) % COUNTRIES.length] ?? 'US'
+  const category = CATEGORIES[(i * 7) % CATEGORIES.length]  // 7 与 3 互质,3 个画像均匀分布
+  const status = STATUSES[(i * 5) % STATUSES.length]
+  const source = SOURCES[(i * 11) % SOURCES.length]
+  const platform = (i % 9 === 0) ? 'douyin' : 'tiktok'
+  const countrySuffix = country.toLowerCase().slice(0, 2)
+  const niche = NICHE_PREFIX[i % NICHE_PREFIX.length]
+  const username = `${niche}_${countrySuffix}${pad(i)}`
+  const keyword = source === 'keyword_search' ? KEYWORDS[(i * 13) % KEYWORDS.length] : ''
+  const follower = Math.max(200, Math.round(800 + ((i * 9973) % 240000)))
+  const likes = follower * (8 + (i % 12))
+  const videos = 5 + (i % 80)
+  // 让一部分用户的 updated_at 落在 24h 内,支撑 kpis.newToday 计算
+  const isFresh = (i % 23) === 0
+  const updated = isFresh
+    ? new Date(Date.now() - (i % 20) * 3600 * 1000).toISOString().slice(0, 19)
+    : new Date(Date.now() - (3 + (i % 90)) * 86400 * 1000).toISOString().slice(0, 19)
+  const created = new Date(Date.now() - (10 + (i % 120)) * 86400 * 1000).toISOString().slice(0, 19)
+  MOCK_USERS.push({
+    id: i,
+    tiktok_id: `${platform}:${username}`,
+    platform,
+    username,
+    nickname: `${niche} ${country}`,
+    bio: `${category} · ${country} · mock #${i}`,
+    follower_count: follower,
+    following_count: 20 + (i % 400),
+    like_count: likes,
+    video_count: videos,
+    country,
+    category,
+    status,
+    source,
+    source_keyword: keyword,
+    created_at: created,
+    updated_at: updated,
+    profile_url: buildProfileUrl(platform, username),
+  })
+}
 
 const MOCK_ACCOUNTS = [
   { id: 1, platform: 'tiktok', username: 'delong_official_01', login_method: 'qr', status: 'expired',    last_login_at: '2026-07-09T14:22:00', nickname: '德龙电气官方 · 主账号',       followers: 12800, videos: 142, likes: 68200, today: { comments: 0, dms: 0, replies: 0, currentTask: 'Cookie 已过期 · 已暂停' },  statusKey: 'offline' },
@@ -144,29 +220,6 @@ const MOCK_QR_SESSIONS: Record<string, { platform: string; username: string; cre
 
 // Reports sub-panels on Reports.vue — funnel, regions, sentiment.
 // One combined endpoint to keep network calls low.
-const MOCK_LLM_PROVIDERS = [
-  { name: 'deepseek', displayName: 'DeepSeek',    initials: 'DS', model: 'deepseek-v4-pro', baseUrl: 'https://api.deepseek.com/v1', url: 'api.deepseek.com',         color: 'linear-gradient(135deg, oklch(58% 0.22 350), oklch(70% 0.14 200))', role: 'main', status: 'active' },
-  { name: 'qwen',     displayName: '通义千问 Qwen-Plus', initials: 'QW', model: 'qwen-plus',         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', url: 'dashscope.aliyuncs.com', color: 'linear-gradient(135deg, oklch(20% 0.012 280), oklch(35% 0.05 280))', role: 'backup', status: 'active' },
-  { name: 'openai',   displayName: 'OpenAI GPT-4o', initials: 'OA', model: 'gpt-4o',            baseUrl: '',                       url: 'api.openai.com',           color: 'linear-gradient(135deg, oklch(45% 0.10 150), oklch(55% 0.14 150))', role: 'backup', status: 'unconfigured' },
-]
-
-const MOCK_LLM_USAGE = {
-  todayCalls: 142,
-  todayCost: 8.42,
-  monthCalls: 3847,
-  monthCost: 186.50,
-  monthBudget: 500,
-  avgLatency: 824,
-  p95: '1.2s',
-  tokenMillions: 2.4,
-  tokenIn: 1.6,
-  tokenOut: 0.8,
-  latency: '824ms',
-  successRate: '99.4%',
-  apiKeyMasked: 'sk-•••••••••••f3a8',
-  dayOverDay: 12.3,
-}
-
 const MOCK_LLM_SKILLS = [
   { name: 'tiktok-filter',    desc: '用户筛选评分',     stage: '环节 2',   calls: 1247, token: 842,  latency: '920ms', share: 90 },
   { name: 'tiktok-strategy',  desc: '用户画像 + 话术生成', stage: '环节 3', calls: 1156, token: 1420, latency: '1.2s',  share: 84 },
@@ -383,6 +436,7 @@ const MOCK_CONFIG = {
   has_api_key: true,
   llm_model: 'deepseek-v4-pro',
   llm_base_url: 'https://api.deepseek.com/v1',
+  douyin_max_concurrency: 3,
   daily_comment_limit: 25,
   daily_dm_limit: 12,
   daily_users: 120,
@@ -439,6 +493,380 @@ const MOCK_LEADS_POOL: LeadResult[] = [
 // ---- Mock responses ------------------------------------------------------
 
 const wrap = <T,>(data: T) => Promise.resolve({ data, status: 200, statusText: 'OK', headers: {}, config: {} as any })
+const clone = <T,>(value: T): T => structuredClone(value)
+
+const PIPELINE_STAGE_ORDER: PipelineStageName[] = [
+  'collect',
+  'filter',
+  'strategy',
+  'outreach',
+  'report',
+  'iterate',
+]
+
+let mockPipelineSequence = 2
+let mockScheduleSequence = 2
+
+const mockStages = (
+  stages: PipelineStageName[],
+  status: PipelineStage['status'] = 'pending',
+): PipelineStage[] => stages.map((stage, index) => ({
+  id: mockPipelineSequence * 100 + index,
+  stage,
+  order: PIPELINE_STAGE_ORDER.indexOf(stage),
+  status,
+  attempt: status === 'pending' ? 0 : 1,
+  result: {},
+  errorMessage: '',
+  startedAt: status === 'pending' ? null : new Date().toISOString(),
+  finishedAt: status === 'succeeded' ? new Date().toISOString() : null,
+}))
+
+const MOCK_PIPELINE_JOBS: PipelineJob[] = [
+  {
+    id: 'mock-job-douyin-running',
+    triggerType: 'manual',
+    scheduleId: null,
+    platform: 'douyin',
+    accountMode: 'specified',
+    accountId: 3,
+    requestedStages: ['collect', 'filter'],
+    stages: [
+      { ...mockStages(['collect'], 'succeeded')[0]!, id: 101 },
+      { ...mockStages(['filter'], 'running')[0]!, id: 102, order: 1 },
+    ],
+    configSnapshot: {},
+    status: 'running',
+    currentStage: 'filter',
+    priority: 100,
+    retryOfJobId: null,
+    errorSummary: '',
+    queuedAt: '2026-07-26T08:00:00Z',
+    startedAt: '2026-07-26T08:00:02Z',
+    finishedAt: null,
+    createdAt: '2026-07-26T08:00:00Z',
+    updatedAt: '2026-07-26T08:00:05Z',
+  },
+  {
+    id: 'mock-job-tiktok-blocked-history',
+    triggerType: 'schedule',
+    scheduleId: 1,
+    platform: 'tiktok',
+    accountMode: 'auto',
+    accountId: null,
+    requestedStages: ['collect'],
+    stages: mockStages(['collect'], 'failed'),
+    configSnapshot: {},
+    status: 'failed',
+    currentStage: 'collect',
+    priority: 100,
+    retryOfJobId: null,
+    errorSummary: 'fingerprint_provider_unavailable',
+    queuedAt: '2026-07-25T08:00:00Z',
+    startedAt: '2026-07-25T08:00:01Z',
+    finishedAt: '2026-07-25T08:00:02Z',
+    createdAt: '2026-07-25T08:00:00Z',
+    updatedAt: '2026-07-25T08:00:02Z',
+  },
+]
+
+const MOCK_PIPELINE_SCHEDULES: PipelineSchedule[] = [
+  {
+    id: 1,
+    name: '每日抖音线索任务',
+    platform: 'douyin',
+    accountMode: 'auto',
+    accountId: null,
+    stages: ['collect', 'filter'],
+    cronExpression: '0 9 * * *',
+    timezone: 'Asia/Shanghai',
+    enabled: true,
+    config: {},
+    nextRunAt: '2026-07-27T01:00:00Z',
+    lastRunAt: '2026-07-26T01:00:00Z',
+    createdAt: '2026-07-20T08:00:00Z',
+    updatedAt: '2026-07-26T01:00:00Z',
+  },
+  {
+    id: 2,
+    name: '暂停的 TikTok 计划',
+    platform: 'tiktok',
+    accountMode: 'auto',
+    accountId: null,
+    stages: ['collect'],
+    cronExpression: '0 10 * * *',
+    timezone: 'Asia/Shanghai',
+    enabled: false,
+    config: {},
+    nextRunAt: null,
+    lastRunAt: null,
+    createdAt: '2026-07-20T08:00:00Z',
+    updatedAt: '2026-07-20T08:00:00Z',
+  },
+]
+
+const mockNotFound = (kind: 'job' | 'schedule', id: string | number): never => {
+  const error = new Error(`${kind} ${id} not found`) as Error & {
+    response: { status: number; data: { detail: { code: string; message: string } } }
+  }
+  error.response = {
+    status: 404,
+    data: {
+      detail: {
+        code: `${kind}_not_found`,
+        message: `${kind} ${id} not found`,
+      },
+    },
+  }
+  throw error
+}
+
+const mockPipelineError = (code: string, message: string, status = 409): never => {
+  const error = new Error(message) as Error & {
+    code: string
+    response: { status: number; data: { detail: { code: string; message: string } } }
+  }
+  error.code = code
+  error.response = {
+    status,
+    data: { detail: { code, message } },
+  }
+  throw error
+}
+
+const validateMockPipelineConfig = (
+  payload: PipelineRuntimeConfigPayload,
+): PipelineRuntimeConfigPayload => {
+  const ranges: Record<
+    Exclude<keyof PipelineRuntimeConfigPayload, 'tiktok_keywords'>,
+    [number, number]
+  > = {
+    daily_users: [20, 500],
+    daily_comment_limit: [1, 50],
+    daily_dm_limit: [1, 30],
+    comment_interval_min: [1, 60],
+    comment_interval_max: [1, 120],
+    dm_interval_min: [1, 60],
+    dm_interval_max: [1, 120],
+    comment_dm_gap_hours: [6, 72],
+    douyin_max_concurrency: [1, 20],
+  }
+  const normalized = {} as PipelineRuntimeConfigPayload
+  for (const [key, [minimum, maximum]] of Object.entries(ranges) as Array<
+    [Exclude<keyof PipelineRuntimeConfigPayload, 'tiktok_keywords'>, [number, number]]
+  >) {
+    const value = payload?.[key]
+    if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      return mockPipelineError(
+        'invalid_config_value',
+        `${key} 必须是 ${minimum}..${maximum} 范围内的整数`,
+        422,
+      )
+    }
+    ;(normalized as any)[key] = value
+  }
+  if (normalized.comment_interval_min > normalized.comment_interval_max) {
+    return mockPipelineError(
+      'invalid_config_value',
+      'comment_interval_min 不能大于 comment_interval_max',
+      422,
+    )
+  }
+  if (normalized.dm_interval_min > normalized.dm_interval_max) {
+    return mockPipelineError(
+      'invalid_config_value',
+      'dm_interval_min 不能大于 dm_interval_max',
+      422,
+    )
+  }
+  if (!Array.isArray(payload?.tiktok_keywords)) {
+    return mockPipelineError(
+      'invalid_config_value',
+      'tiktok_keywords 必须是字符串数组',
+      422,
+    )
+  }
+  const keywords: string[] = []
+  const seen = new Set<string>()
+  for (const item of payload.tiktok_keywords) {
+    if (typeof item !== 'string') {
+      return mockPipelineError(
+        'invalid_config_value',
+        'tiktok_keywords 只能包含字符串',
+        422,
+      )
+    }
+    const keyword = item.trim()
+    if (keyword && !seen.has(keyword)) {
+      seen.add(keyword)
+      keywords.push(keyword)
+    }
+  }
+  normalized.tiktok_keywords = keywords
+  return normalized
+}
+
+const parseCronField = (
+  source: string,
+  min: number,
+  max: number,
+  normalize: (value: number) => number = value => value,
+): Set<number> => {
+  const values = new Set<number>()
+  for (const rawPart of source.split(',')) {
+    const [rangePart, rawStep] = rawPart.split('/')
+    const step = rawStep === undefined ? 1 : Number(rawStep)
+    if (!Number.isInteger(step) || step <= 0 || !rangePart) {
+      throw new Error(`invalid cron field: ${source}`)
+    }
+    let start: number
+    let end: number
+    if (rangePart === '*') {
+      start = min
+      end = max
+    } else if (rangePart.includes('-')) {
+      const [rawStart, rawEnd] = rangePart.split('-')
+      start = Number(rawStart)
+      end = Number(rawEnd)
+    } else {
+      start = Number(rangePart)
+      end = start
+    }
+    if (
+      !Number.isInteger(start)
+      || !Number.isInteger(end)
+      || start < min
+      || end > max
+      || start > end
+    ) {
+      throw new Error(`invalid cron field: ${source}`)
+    }
+    for (let value = start; value <= end; value += step) {
+      values.add(normalize(value))
+    }
+  }
+  if (!values.size) throw new Error(`invalid cron field: ${source}`)
+  return values
+}
+
+const nextMockCronRun = (
+  cronExpression: string,
+  timezone: string,
+  after = new Date(),
+): string => {
+  const fields = cronExpression.trim().split(/\s+/)
+  if (fields.length !== 5) throw new Error('cron expression must have five fields')
+  const [minuteField, hourField, dayField, monthField, weekdayField] = fields
+  const minutes = parseCronField(minuteField!, 0, 59)
+  const hours = parseCronField(hourField!, 0, 23)
+  const days = parseCronField(dayField!, 1, 31)
+  const months = parseCronField(monthField!, 1, 12)
+  const weekdays = parseCronField(weekdayField!, 0, 7, value => value === 7 ? 0 : value)
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+  const dayWildcard = dayField === '*'
+  const weekdayWildcard = weekdayField === '*'
+  const sortedMinutes = [...minutes].sort((left, right) => left - right)
+  const candidate = new Date(after)
+  candidate.setUTCSeconds(0, 0)
+  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1)
+  const deadline = new Date(candidate)
+  deadline.setUTCFullYear(deadline.getUTCFullYear() + 8)
+
+  while (candidate <= deadline) {
+    const parts = Object.fromEntries(
+      formatter.formatToParts(candidate)
+        .filter(part => part.type !== 'literal')
+        .map(part => [part.type, Number(part.value)]),
+    )
+    const year = parts.year!
+    const month = parts.month!
+    const day = parts.day!
+    const hour = parts.hour!
+    const minute = parts.minute!
+    const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+    const dayMatches = days.has(day)
+    const weekdayMatches = weekdays.has(weekday)
+    const calendarDayMatches = dayWildcard
+      ? weekdayMatches
+      : weekdayWildcard
+        ? dayMatches
+        : dayMatches || weekdayMatches
+    if (!months.has(month) || !calendarDayMatches || !hours.has(hour)) {
+      candidate.setUTCMinutes(candidate.getUTCMinutes() + (60 - minute || 60))
+      continue
+    }
+    if (minutes.has(minute)) {
+      return candidate.toISOString()
+    }
+    const nextMinute = sortedMinutes.find(value => value > minute)
+    const advance = nextMinute === undefined
+      ? (60 - minute) + sortedMinutes[0]!
+      : nextMinute - minute
+    candidate.setUTCMinutes(candidate.getUTCMinutes() + advance)
+  }
+  throw new Error('cron expression has no run in the next eight years')
+}
+
+const createMockPipelineJob = (payload: CreatePipelineJobPayload) => {
+  const now = new Date().toISOString()
+  const job: PipelineJob = {
+    id: `mock-job-${Date.now()}-${++mockPipelineSequence}`,
+    triggerType: 'manual',
+    scheduleId: null,
+    platform: payload.platform,
+    accountMode: payload.accountMode,
+    accountId: payload.accountMode === 'specified' ? (payload.accountId ?? null) : null,
+    requestedStages: [...payload.stages],
+    stages: mockStages(payload.stages),
+    configSnapshot: clone(payload.configSnapshot ?? {}),
+    status: 'queued',
+    currentStage: '',
+    priority: 100,
+    retryOfJobId: null,
+    errorSummary: '',
+    queuedAt: now,
+    startedAt: null,
+    finishedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+  MOCK_PIPELINE_JOBS.unshift(job)
+  return wrap({ job: clone(job) })
+}
+
+const scheduleFromPayload = (
+  id: number,
+  payload: PipelineSchedulePayload,
+  createdAt = new Date().toISOString(),
+): PipelineSchedule => {
+  const now = new Date().toISOString()
+  return {
+    id,
+    name: payload.name,
+    platform: payload.platform,
+    accountMode: payload.accountMode,
+    accountId: payload.accountMode === 'specified' ? (payload.accountId ?? null) : null,
+    stages: [...payload.stages],
+    cronExpression: payload.cronExpression,
+    timezone: payload.timezone,
+    enabled: payload.enabled,
+    config: clone(payload.config ?? payload.configSnapshot ?? {}),
+    nextRunAt: payload.enabled
+      ? nextMockCronRun(payload.cronExpression, payload.timezone)
+      : null,
+    lastRunAt: null,
+    createdAt,
+    updatedAt: now,
+  }
+}
 
 export const mockApi = {
   // Auth
@@ -457,12 +885,37 @@ export const mockApi = {
 
   // Users
   getUsers: (params: any = {}) => sleep(150).then(() => {
-    const { status } = params || {}
+    const { status, category, limit, offset = 0 } = params || {}
     let items = MOCK_USERS
-    if (status) items = items.filter(u => u.status === status)
-    return wrap({ items, total: items.length })
+    if (status)   items = items.filter((u: any) => u.status === status)
+    if (category) items = items.filter((u: any) => u.category === category)
+    const total = items.length
+    // Mock 默认返回全量（让前端可以客户端筛选 + 分页,与 subtitle total 自洽）；
+    // 真实后端会自己用 limit 截断。
+    const sliced = typeof limit === 'number' ? items.slice(offset, offset + limit) : items
+    return wrap({ items: sliced, total })
   }),
-  getUserStats: () => wrap({ total: 1247, qualified: 891, pending: 182, contacted: 96, replied: 14, rejected: 64 }),
+  getUserStats: () => {
+    // 根据 MOCK_USERS 实际分布计算,保证 /api/users 与 /api/users/stats
+    // 返回的数字自洽(subtitle / kpis / 表格分页用同一来源)。
+    const counts: Record<string, number> = { pending: 0, qualified: 0, contacted: 0, replied: 0, rejected: 0 }
+    const byPersona: Record<string, number> = { distributor: 0, buyer: 0, peer: 0, unknown: 0 }
+    for (const u of MOCK_USERS) {
+      counts[u.status] = (counts[u.status] || 0) + 1
+      byPersona[u.category] = (byPersona[u.category] || 0) + 1
+    }
+    return wrap({
+      total: MOCK_USERS.length,
+      pending: counts.pending,
+      qualified: counts.qualified,
+      contacted: counts.contacted,
+      replied: counts.replied,
+      rejected: counts.rejected,
+      // persona 维度(对齐真实后端 /api/users/stats 的 by_persona),
+      // 让前端 chip "经销商/买家/同行" 也走权威源。
+      by_persona: byPersona,
+    })
+  },
   // Per-user detail page — falls back to a generic skeleton for users without
   // a bespoke entry, so demo still renders something for any username.
   getUserDetail: (username: string) => sleep(150).then(() => {
@@ -507,12 +960,140 @@ export const mockApi = {
   getDashboard: () => sleep(150).then(() => wrap(MOCK_DASHBOARD)),
   getPipelineEvents: (limit = 60) => sleep(150).then(() => wrap(MOCK_PIPELINE_EVENTS.slice(0, limit))),
   getPipelineOverview: () => sleep(100).then(() => wrap(MOCK_PIPELINE_OVERVIEW)),
-  runPipeline: (stages: string[]) => sleep(300).then(() => wrap({
-    job_id: 'mock-' + Date.now(),
-    started_at: new Date().toISOString(),
-    stages,
-    results: stages.map(s => ({ stage: s, status: 'started' })),
+  createPipelineJob: (payload: CreatePipelineJobPayload) =>
+    sleep(100).then(() => createMockPipelineJob(payload)),
+  listPipelineJobs: (params: PipelineJobListParams = {}) => sleep(80).then(() => {
+    const limit = params.limit ?? 50
+    const offset = params.offset ?? 0
+    const filtered = MOCK_PIPELINE_JOBS.filter(job =>
+      (!params.platform || job.platform === params.platform)
+      && (!params.status || job.status === params.status),
+    )
+    return wrap({
+      items: filtered.slice(offset, offset + limit).map(clone),
+      total: filtered.length,
+      limit,
+      offset,
+    })
+  }),
+  getPipelineJob: (jobId: string) => sleep(50).then(() => {
+    const job = MOCK_PIPELINE_JOBS.find(item => item.id === jobId)
+    return job ? wrap({ job: clone(job) }) : mockNotFound('job', jobId)
+  }),
+  cancelPipelineJob: (jobId: string) => sleep(80).then(() => {
+    const job = MOCK_PIPELINE_JOBS.find(item => item.id === jobId)
+    if (!job) return mockNotFound('job', jobId)
+    const now = new Date().toISOString()
+    if (job.status === 'queued') {
+      job.status = 'cancelled'
+      job.finishedAt = now
+      job.updatedAt = now
+    } else if (job.status === 'running') {
+      job.status = 'cancelling'
+      job.updatedAt = now
+    }
+    return wrap({ job: clone(job) })
+  }),
+  retryPipelineJob: (jobId: string) => sleep(80).then(async () => {
+    const original = MOCK_PIPELINE_JOBS.find(item => item.id === jobId)
+    if (!original) return mockNotFound('job', jobId)
+    if (!['failed', 'partial_failed', 'interrupted'].includes(original.status)) {
+      return mockPipelineError(
+        'job_not_retryable',
+        `cannot retry pipeline job in ${original.status} state`,
+      )
+    }
+    const response = await createMockPipelineJob({
+      platform: original.platform,
+      accountMode: original.accountMode,
+      accountId: original.accountId,
+      stages: original.requestedStages,
+      configSnapshot: original.configSnapshot,
+    })
+    response.data.job.triggerType = 'retry'
+    response.data.job.retryOfJobId = original.id
+    const stored = MOCK_PIPELINE_JOBS.find(item => item.id === response.data.job.id)!
+    stored.triggerType = 'retry'
+    stored.retryOfJobId = original.id
+    return response
+  }),
+  getPipelineCapabilities: () => sleep(60).then(() => wrap({
+    platforms: {
+      tiktok: {
+        available: false,
+        providerAvailable: false,
+        provider: 'fingerprint',
+        code: 'fingerprint_provider_unavailable',
+        message: '尚未配置 TikTok 指纹浏览器 Provider',
+        accountCount: MOCK_ACCOUNTS.filter(account =>
+          account.platform === 'tiktok' && account.status === 'logged_in',
+        ).length,
+        maxConcurrency: 1,
+      },
+      douyin: {
+        available: MOCK_ACCOUNTS.some(account =>
+          account.platform === 'douyin' && account.status === 'logged_in',
+        ),
+        providerAvailable: true,
+        provider: 'playwright',
+        code: '',
+        message: '',
+        accountCount: MOCK_ACCOUNTS.filter(account =>
+          account.platform === 'douyin' && account.status === 'logged_in',
+        ).length,
+        maxConcurrency: 3,
+      },
+    },
   })),
+  createPipelineSchedule: (payload: PipelineSchedulePayload) => sleep(100).then(() => {
+    const schedule = scheduleFromPayload(++mockScheduleSequence, payload)
+    MOCK_PIPELINE_SCHEDULES.unshift(schedule)
+    return wrap({ schedule: clone(schedule) })
+  }),
+  listPipelineSchedules: (platform?: CreatePipelineJobPayload['platform']) =>
+    sleep(60).then(() => {
+      const items = platform
+        ? MOCK_PIPELINE_SCHEDULES.filter(schedule => schedule.platform === platform)
+        : MOCK_PIPELINE_SCHEDULES
+      return wrap({ items: items.map(clone), total: items.length })
+    }),
+  updatePipelineSchedule: (
+    scheduleId: number,
+    payload: PipelineSchedulePayload,
+  ) => sleep(100).then(() => {
+    const index = MOCK_PIPELINE_SCHEDULES.findIndex(item => item.id === scheduleId)
+    if (index < 0) return mockNotFound('schedule', scheduleId)
+    const existing = MOCK_PIPELINE_SCHEDULES[index]!
+    const schedule = scheduleFromPayload(scheduleId, payload, existing.createdAt ?? undefined)
+    schedule.lastRunAt = existing.lastRunAt
+    MOCK_PIPELINE_SCHEDULES[index] = schedule
+    return wrap({ schedule: clone(schedule) })
+  }),
+  deletePipelineSchedule: (scheduleId: number) => sleep(80).then(() => {
+    const index = MOCK_PIPELINE_SCHEDULES.findIndex(item => item.id === scheduleId)
+    if (index < 0) return mockNotFound('schedule', scheduleId)
+    MOCK_PIPELINE_SCHEDULES.splice(index, 1)
+    return wrap(undefined)
+  }),
+  runPipeline: (
+    stages: PipelineStageName[],
+    opts: Partial<Omit<CreatePipelineJobPayload, 'stages'>> = {},
+  ) => {
+    if (!opts.platform || !opts.accountMode) {
+      return mockPipelineError(
+        'pipeline_selection_required',
+        '请选择执行平台和账号模式',
+        422,
+      )
+    }
+    return createMockPipelineJob({
+      platform: opts.platform,
+      accountMode: opts.accountMode,
+      accountId: opts.accountId,
+      configSnapshot: opts.configSnapshot,
+      stages,
+    })
+  },
   streamPipelineEvents: () => sleep(150).then(() => wrap({})),
 
   // Reports
@@ -537,16 +1118,71 @@ export const mockApi = {
   }),
   // Reports sub-panels — funnel, regions, sentiment (one round-trip)
   getReportsOverview: () => sleep(150).then(() => wrap(MOCK_REPORTS_OVERVIEW)),
-  // LLM config page — providers + usage + skill stats (one round-trip)
-  getLlmProviders: () => sleep(120).then(() => wrap({
-    providers: MOCK_LLM_PROVIDERS,
-    usage: MOCK_LLM_USAGE,
-    skills: MOCK_LLM_SKILLS,
-  })),
-
+  // LLM management deliberately has no mock endpoint: secrets, routes, and
+  // connectivity checks must always reflect the real backend.
   // Config
   getConfig: () => sleep(100).then(() => wrap(MOCK_CONFIG)),
-  setConfigKey: () => sleep(100).then(() => wrap({ ok: true })),
+  updatePipelineConfig: (payload: PipelineRuntimeConfigPayload) => sleep(100).then(() => {
+    const normalized = validateMockPipelineConfig(payload)
+    const previousConcurrency = MOCK_CONFIG.douyin_max_concurrency
+    const committed: PipelineRuntimeConfigPayload = {
+      ...normalized,
+      tiktok_keywords: [...normalized.tiktok_keywords],
+    }
+    Object.assign(MOCK_CONFIG, committed)
+    const response: PipelineRuntimeConfigResponse = {
+      status: 'ok',
+      config: {
+        ...committed,
+        tiktok_keywords: [...committed.tiktok_keywords],
+      },
+      restartRequired: previousConcurrency !== committed.douyin_max_concurrency,
+    }
+    return wrap(response)
+  }),
+  setConfigKey: (key: string, value: string) => sleep(100).then(() => {
+    let persistedValue: string | number = value
+    let responseValue = value
+    let restartRequired = false
+    if (key === 'douyin_max_concurrency') {
+      const parsed = Number(value.trim())
+      if (!Number.isInteger(parsed)) {
+        return mockPipelineError(
+          'invalid_config_value',
+          '抖音并发数必须是整数',
+          422,
+        )
+      }
+      if (parsed < 1 || parsed > 20) {
+        return mockPipelineError(
+          'invalid_config_value',
+          '抖音并发数必须在 1..20 范围内',
+          422,
+        )
+      }
+      persistedValue = parsed
+      responseValue = String(parsed)
+      restartRequired = true
+    }
+    const numericKeys = new Set([
+      'daily_comment_limit',
+      'daily_dm_limit',
+      'daily_users',
+      'comment_interval_min',
+      'comment_interval_max',
+      'dm_interval_min',
+      'dm_interval_max',
+      'comment_dm_gap_hours',
+    ])
+    if (numericKeys.has(key)) persistedValue = Number(value)
+    ;(MOCK_CONFIG as Record<string, unknown>)[key] = persistedValue
+    return wrap({
+      status: 'ok',
+      key,
+      value: responseValue,
+      restartRequired,
+    })
+  }),
   saveApiKey: () => sleep(150).then(() => wrap({ ok: true })),
 
   // Accounts
@@ -562,15 +1198,18 @@ export const mockApi = {
   }),
   addUser: (data: any) => sleep(150).then(() => {
     const id = MOCK_USERS.length + 1
+    const platform = data.platform || 'tiktok'
+    const profile_url = (data.profile_url || '').trim() || buildProfileUrl(platform, data.username)
     MOCK_USERS.push({
-      id, tiktok_id: `${data.platform || 'tiktok'}:${data.username}`, username: data.username,
+      id, tiktok_id: `${platform}:${data.username}`, platform, username: data.username,
       nickname: '', bio: data.bio || '', follower_count: data.follower_count || 0,
       following_count: 0, like_count: 0, video_count: 0,
       country: data.country || '', category: data.category || 'unknown',
       status: 'pending', source: 'manual', source_keyword: '',
+      profile_url,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     })
-    return wrap({ id, username: data.username, platform: data.platform || 'tiktok', status: 'pending' })
+    return wrap({ id, username: data.username, platform, status: 'pending', profile_url })
   }),
   deleteAccount: (id: number) => sleep(100).then(() => {
     const i = MOCK_ACCOUNTS.findIndex(a => a.id === id)
@@ -578,6 +1217,14 @@ export const mockApi = {
     return wrap({ ok: true })
   }),
   updateAccountCookies: () => sleep(100).then(() => wrap({ ok: true })),
+  updateAccountMetadata: (id: number, displayName: string) => sleep(100).then(() => {
+    const account = MOCK_ACCOUNTS.find(item => item.id === id)
+    if (account) Object.assign(account, { display_name: displayName.trim() })
+    return wrap({
+      ...(account || { id }),
+      display_name: displayName.trim(),
+    })
+  }),
   startQrcodeLogin: (platform: string) => sleep(200).then(() => {
     const username = platform === 'douyin' ? 'new_douyin_user' : 'new_tiktok_user'
     const session_token = 'mock-session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)

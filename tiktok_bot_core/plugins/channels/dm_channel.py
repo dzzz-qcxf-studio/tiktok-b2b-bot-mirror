@@ -3,7 +3,7 @@
 import logging
 
 from tiktok_bot_core.extensions.registry import ChannelPlugin
-from tiktok_bot_core.browser.client import get_browser
+from tiktok_bot_core.browser.providers import require_browser_client
 from tiktok_bot_core.platforms import PlatformType, get_platform
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ class DMChannel(ChannelPlugin):
         pt = PlatformType.parse(platform)
         pf = get_platform(pt)
 
-        browser = await get_browser()
+        browser = require_browser_client(config, platform=pt.value)
         try:
             await browser.navigate(pf.user_profile_url(target))
             await browser.wait(2500)

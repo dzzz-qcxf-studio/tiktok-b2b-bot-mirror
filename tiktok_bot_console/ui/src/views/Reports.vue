@@ -512,6 +512,27 @@ load()
 </script>
 
 <style scoped>
+/* Custom-report modal — scoped locally so the dialog floats above page flow
+   and remains independent from other application overlays. */
+.qr-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .45);
+  display: grid; place-items: center; z-index: 100;
+  animation: qrFade .15s ease;
+}
+@keyframes qrFade { from { opacity: 0 } to { opacity: 1 } }
+
+.qr-modal {
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, .18);
+  overflow: hidden;
+}
+.qr-close {
+  border: none; background: transparent; font-size: 22px; line-height: 1;
+  color: var(--muted); cursor: pointer; padding: 0 4px;
+}
+.qr-close:hover { color: var(--fg); }
+
 .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
 .kpi-block { padding: 18px 20px; }
 .kpi-block .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); font-weight: 600; }

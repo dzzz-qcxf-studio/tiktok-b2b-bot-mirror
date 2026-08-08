@@ -11,7 +11,7 @@ print('Database initialized')
 "
 
 echo "Starting API server..."
-uvicorn tiktok_bot_api.main:app --host 0.0.0.0 --port 8000 &
+uvicorn tiktok_bot_api.main:app --host 0.0.0.0 --port 8000 --workers 1 &
 API_PID=$!
 
 # Wait for API to be ready

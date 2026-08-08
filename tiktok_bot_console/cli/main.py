@@ -127,35 +127,77 @@ def pipeline():
 @pipeline.command("run")
 @click.option("--stages", default=None, help="要运行的阶段，逗号分隔。例: collect,filter")
 @click.option("--once", is_flag=True, help="运行全部阶段")
+@click.option(
+    "--platform",
+    type=click.Choice(["tiktok", "douyin"]),
+    default="tiktok",
+    show_default=True,
+    help="任务执行平台",
+)
+@click.option(
+    "--account-mode",
+    type=click.Choice(["auto", "specified"]),
+    default="auto",
+    show_default=True,
+    help="自动选择或明确指定账号",
+)
+@click.option("--account-id", type=click.IntRange(min=1), help="指定账号 ID")
 @click.pass_context
-def pipeline_run(ctx, stages, once):
-    """运行 Pipeline"""
+def pipeline_run(ctx, stages, once, platform, account_mode, account_id):
+    """创建统一持久化 Pipeline 任务。"""
+
     async def _run():
-        from tiktok_bot_core.services.pipeline import PipelineService
-        from tiktok_bot_core.extensions.registry import register as get_registry
-        from tiktok_bot_core.plugins import register_default_plugins
+        from tiktok_bot_core.models.pipeline_states import PIPELINE_STAGES
+        from tiktok_bot_core.services.pipeline_jobs import (
+            PipelineJobError,
+            PipelineJobService,
+        )
 
-        # 确保插件注册
-        reg = get_registry()
-        if not reg.list_plugins()["collectors"]:
-            register_default_plugins(reg)
-
-        stage_list = stages.split(",") if stages else []
+        stage_list = (
+            [stage.strip() for stage in stages.split(",") if stage.strip()]
+            if stages
+            else []
+        )
         if once:
-            stage_list = ["collect", "filter", "strategy", "outreach", "report"]
+            stage_list = list(PIPELINE_STAGES)
 
         if not stage_list:
-            console.print("[yellow]请指定 --stages 或 --once[/yellow]")
-            return
+            raise click.UsageError("请指定 --stages 或 --once")
+        unknown_stages = set(stage_list) - set(PIPELINE_STAGES)
+        if unknown_stages:
+            names = ", ".join(sorted(unknown_stages))
+            raise click.BadParameter(
+                f"未知阶段: {names}",
+                param_hint="--stages",
+            )
 
-        service = PipelineService()
-        console.print(f"[bold]Pipeline 启动: {stage_list}[/bold]")
+        service = PipelineJobService(database=ctx.obj["db"])
+        try:
+            job = await service.create_job(
+                platform=platform,
+                account_mode=account_mode,
+                account_id=account_id,
+                stages=stage_list,
+                trigger_type="manual",
+            )
+        except PipelineJobError as exc:
+            raise click.ClickException(
+                f"{exc.code}: {exc.message}"
+            ) from exc
+        return {
+            "job": {
+                "id": job.id,
+                "platform": job.platform,
+                "accountMode": job.account_mode,
+                "accountId": job.account_id,
+                "stages": list(job.stages_json or []),
+                "status": job.status,
+                "triggerType": job.trigger_type,
+            }
+        }
 
-        async for result in service.run(stages=stage_list):
-            status_icon = "✅" if result["status"] == "ok" else "❌"
-            console.print(f"  {status_icon} [{result['stage']}] {result['status']} — {result['result']}")
-
-    asyncio.run(_run())
+    payload = asyncio.run(_run())
+    console.print(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 @pipeline.command("status")
@@ -228,6 +270,87 @@ def report_daily(ctx):
     console.print(f"  评论: {r.comments_sent}  私信: {r.dms_sent}")
     console.print(f"  回复: {r.replies_received}  回复率: {r.reply_rate:.1%}")
     console.print(f"  商业线索: {r.business_leads}")
+
+
+# ===== Browse Commands =====
+
+@cli.group()
+def browse():
+    """Hermes 浏览器 Agent（截图→LLM→动作 闭环）。"""
+    pass
+
+
+@browse.command("run")
+@click.option(
+    "--platform",
+    type=click.Choice(["douyin", "tiktok"]),
+    default="douyin",
+    show_default=True,
+    help="目标平台。tiktok 暂未配置指纹 Provider，会失败。",
+)
+@click.option(
+    "--account-id",
+    type=click.IntRange(min=1),
+    required=True,
+    help="使用哪条已 logged_in 账号驱动浏览器。",
+)
+@click.option(
+    "--goal",
+    required=True,
+    help="自然语言目标，例如「找一个批发商账号」。",
+)
+@click.option(
+    "--max-steps",
+    type=click.IntRange(min=1, max=50),
+    default=10,
+    show_default=True,
+    help="Agent 最大循环步数；超出后状态为 timeout。",
+)
+@click.pass_context
+def browse_run(ctx, platform, account_id, goal, max_steps):
+    """驱动账号浏览器，让 LLM 决定每一步的 click/scroll/extract。"""
+
+    from tiktok_bot_core.browser.client import BrowserClient
+    from tiktok_bot_core.events.bus import EventBus, EventType, get_event_bus
+    from tiktok_bot_core.llm.router import get_llm_router
+    from tiktok_bot_core.services.browse_agent import BrowseAgent
+
+    bus = get_event_bus()
+
+    async def _run() -> dict[str, object]:
+        agent = BrowseAgent(
+            router=get_llm_router(),
+            bus=bus,
+            browser_factory=BrowserClient,
+            max_steps=max_steps,
+        )
+        return await agent.run(
+            goal=goal,
+            platform=platform,
+            account_id=account_id,
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001 - 顶层 CLI 兜底
+        raise click.ClickException(str(exc))
+
+    steps = bus.history(EventType.BROWSE_STEP, limit=max_steps)
+    payload = {
+        "status": result.status,
+        "summary": result.summary,
+        "steps": result.steps,
+        "trace": [
+            {
+                "step": s.step,
+                "action": s.payload.get("action"),
+                "rationale": s.payload.get("rationale", ""),
+                "screenshotHash": s.payload.get("screenshotHash", ""),
+            }
+            for s in steps
+        ],
+    }
+    console.print(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 # ===== Config Commands =====

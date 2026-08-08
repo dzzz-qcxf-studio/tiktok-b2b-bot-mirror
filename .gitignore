@@ -40,10 +40,15 @@ venv.bak/
 # Data (运行时生成)
 data/*.db
 data/*.sqlite*
+data/*.lock
 data/chroma_db/
 data/reports/
 data/logs/
 data/screenshots/
+data/browser_profiles/
+data/auth_states/
+tiktok_bot_core/data/browser_profiles/
+tiktok_bot_core/data/auth_states/
 
 # OS
 .DS_Store
@@ -73,4 +78,6 @@ coverage.xml
 *.tmp
 .cache/
 data/qrcodes/
+tiktok_bot_core/data/qrcodes/
+tests/manual_*_probe.py
 MediaCrawler_ref/

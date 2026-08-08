@@ -5,9 +5,9 @@ import { ref, watch, readonly } from 'vue'
  * Persisted in localStorage so the choice survives page reloads.
  *
  * Modes:
- *  - 'auto'  → follow VITE_USE_MOCK (default; whatever the .env says)
- *  - 'mock'  → force mock, even if .env says real
- *  - 'real'  → force real backend, falling back to mock only on network failure
+ *  - 'auto'  → follow VITE_USE_MOCK; development may use a visibly marked fallback
+ *  - 'mock'  → force isolated demo data
+ *  - 'real'  → force the real backend and surface failures without fallback
  */
 export type ApiMode = 'auto' | 'mock' | 'real'
 const STORAGE_KEY = 'tiktok-bot:api-mode'

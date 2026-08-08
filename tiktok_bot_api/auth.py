@@ -3,16 +3,38 @@
 import hashlib
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 from fastapi import HTTPException, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
+from dotenv import dotenv_values
 from pydantic import BaseModel
 
 from tiktok_bot_core.storage.database import get_db
 from tiktok_bot_core.storage.sqlite_store import SqliteStore
 
-_SECRET = os.getenv("JWT_SECRET", hashlib.sha256(os.urandom(64)).hexdigest()[:32])
+_PROJECT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
+
+def _resolve_jwt_secret(env_path: Path = _PROJECT_ENV_PATH) -> str:
+    """Resolve one stable JWT secret even when Uvicorn omits --env-file."""
+
+    process_secret = os.getenv("JWT_SECRET", "").strip()
+    if process_secret:
+        return process_secret
+    try:
+        project_secret = str(
+            dotenv_values(env_path).get("JWT_SECRET") or ""
+        ).strip()
+    except OSError:
+        project_secret = ""
+    if project_secret:
+        return project_secret
+    return hashlib.sha256(os.urandom(64)).hexdigest()[:32]
+
+
+_SECRET = _resolve_jwt_secret()
 ALGORITHM = "HS256"
 EXPIRE_DAYS = 7
 security = HTTPBearer(auto_error=False)

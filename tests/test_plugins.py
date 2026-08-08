@@ -117,6 +117,7 @@ def test_channel_plugin_metadata():
 async def test_keyword_collector_with_mock_browser():
     """KeywordCollector 用 mock browser 不实际启动"""
     from tiktok_bot_core.plugins.collectors.keyword_collector import KeywordCollector
+    from tiktok_bot_core.browser.providers import BrowserSession
 
     mock_browser = MagicMock()
     mock_browser.navigate = AsyncMock()
@@ -129,10 +130,17 @@ async def test_keyword_collector_with_mock_browser():
     fake_card2.get_attribute = AsyncMock(return_value="https://www.tiktok.com/@bob")
     mock_browser.query_all = AsyncMock(return_value=[fake_card1, fake_card2])
 
-    with patch("tiktok_bot_core.plugins.collectors.keyword_collector.get_browser",
-               new=AsyncMock(return_value=mock_browser)):
-        c = KeywordCollector()
-        users = await c.collect({"keywords": ["wholesale"], "max_per_keyword": 10})
+    c = KeywordCollector()
+    users = await c.collect({
+        "keywords": ["wholesale"],
+        "max_per_keyword": 10,
+        "platform": "tiktok",
+        "browser_session": BrowserSession(
+            platform="tiktok",
+            account_id=1,
+            client=mock_browser,
+        ),
+    })
 
     assert len(users) == 2
     assert users[0]["username"] == "alice"

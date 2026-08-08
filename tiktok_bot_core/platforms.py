@@ -90,7 +90,9 @@ DOUYIN = Platform(
         # 抖音 Web 端选择器（参考 MediaCrawler + 实际 DOM 结构）
         "user_card": 'li[data-e2e="search-user-card"], div.user-card',
         "user_link": 'a[href*="/user/"]',
-        "video_card": 'div[data-e2e="user-post-item"], li.user-post',
+        "video_card": '[data-e2e="feed-active-video"], [data-e2e="feed-video-item"], div[class*="video-card"]',
+        "video_text": '[data-e2e="video-desc"], [class*="video-info-detail"] span, [class*="title"]',
+        "author_link": 'a[href*="/user/"]',
         "comment_input": 'div[contenteditable="true"]',
         "comment_post": 'button[data-e2e="comment-post"], button:has-text("发送")',
         "message_btn": 'button:has-text("私信"), button:has-text("发消息")',

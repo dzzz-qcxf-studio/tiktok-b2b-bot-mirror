@@ -1,393 +1,620 @@
 <template>
-  <div class="page">
+  <div class="page llm-page">
     <div class="page-head">
       <div>
         <h1>{{ $t('llm.title') }}</h1>
         <p>{{ $t('llm.subtitle') }}</p>
       </div>
-      <div style="display:flex;gap:8px">
-        <button class="btn" @click="exportUsage">{{ $t('llm.exportUsage') }}</button>
-        <button class="btn" @click="switchMain">{{ $t('llm.switchMain') }}</button>
+      <div class="head-actions">
+        <button class="btn" :disabled="loading" @click="loadAll">{{ $t('llm.refresh') }}</button>
+        <button class="btn brand" @click="openCreate">{{ $t('llm.addProvider') }}</button>
       </div>
     </div>
 
-    <div class="hero-prov">
-      <div class="av">{{ mainProvider?.initials || 'LLM' }}</div>
+    <div v-if="serviceError" class="notice error-notice" role="alert">
       <div>
-        <h2>{{ mainProvider?.displayName || '—' }} <span class="chip ok" style="margin-left:8px;vertical-align:middle"><span class="dot"></span> {{ $t('llm.mainHealthy') }}</span></h2>
-        <div class="model">{{ mainProvider?.model || '—' }} · {{ mainProvider?.baseUrl || '' }}</div>
-        <div class="meta">
-          <span>API Key <b>{{ apiKeyMasked }}</b></span>
-          <span>{{ $t('llm.latency') }} <b :style="{ color: latencyColor }">{{ latency }}</b></span>
-          <span>{{ $t('llm.successRate') }} <b :style="{ color: successColor }">{{ successRate }}</b></span>
-          <span>{{ $t('llm.todayCalls') }} <b>{{ todayCalls }} {{ $t('llm.times') }}</b> · ¥{{ todayCost }}</span>
-        </div>
+        <b>{{ $t('llm.serviceUnavailable') }}</b>
+        <p>{{ serviceError }}</p>
       </div>
-      <div style="display:flex;gap:8px">
-        <button class="btn" @click="showEdit = true">{{ $t('common.edit') }}</button>
-        <button class="btn brand" @click="testConnection" :disabled="testing">
-          {{ testing ? $t('common.loading') : $t('llm.testConn') }}
+      <button class="btn sm" @click="loadAll">{{ $t('llm.retry') }}</button>
+    </div>
+
+    <div class="summary-grid" aria-label="LLM usage summary">
+      <div class="card metric-card">
+        <span>{{ $t('llm.providerMetric') }}</span>
+        <strong>{{ providers.length }}</strong>
+        <small>{{ $t('llm.configuredKeys', { n: configuredCount }) }}</small>
+      </div>
+      <div class="card metric-card">
+        <span>{{ $t('llm.requestCount') }}</span>
+        <strong>{{ usage.requestCount.toLocaleString() }}</strong>
+        <small>{{ $t('llm.successFailure', { success: usage.successCount, failure: usage.failureCount }) }}</small>
+      </div>
+      <div class="card metric-card">
+        <span>{{ $t('llm.totalTokens') }}</span>
+        <strong>{{ usage.totalTokens.toLocaleString() }}</strong>
+        <small>{{ $t('llm.inputOutputTokens', { input: usage.inputTokens, output: usage.outputTokens }) }}</small>
+      </div>
+      <div class="card metric-card">
+        <span>{{ $t('llm.averageLatency') }}</span>
+        <strong>{{ Math.round(usage.averageLatencyMs) }}<em> ms</em></strong>
+        <small>{{ $t('llm.successRateValue', { rate: successRate }) }}</small>
+      </div>
+    </div>
+
+    <section class="card section-card">
+      <div class="card-hd section-head">
+        <div>
+          <h3>{{ $t('llm.providersSection') }}</h3>
+          <span class="hint">{{ $t('llm.providersSecurityHint') }}</span>
+        </div>
+        <span class="count-chip">{{ $t('llm.count', { n: providers.length }) }}</span>
+      </div>
+
+      <div v-if="loading" class="state-box">{{ $t('llm.loadingProviders') }}</div>
+      <div v-else-if="providers.length === 0" class="state-box empty-state">
+        <b>{{ $t('llm.emptyProviderTitle') }}</b>
+        <span>{{ $t('llm.emptyProviderDesc') }}</span>
+        <button class="btn brand" @click="openCreate">{{ $t('llm.addFirstProvider') }}</button>
+      </div>
+      <div v-else class="provider-grid">
+        <article v-for="provider in providers" :key="provider.id" class="provider-card">
+          <div class="provider-top">
+            <div class="provider-avatar">{{ initials(provider.displayName) }}</div>
+            <div class="provider-title">
+              <h4>{{ provider.displayName }}</h4>
+              <code>{{ provider.name }}</code>
+            </div>
+            <span :class="['status-pill', provider.enabled ? 'enabled' : 'disabled']">
+              {{ provider.enabled ? $t('llm.enabled') : $t('llm.disabled') }}
+            </span>
+          </div>
+          <dl class="provider-details">
+            <div><dt>{{ $t('llm.model') }}</dt><dd>{{ provider.defaultModel }}</dd></div>
+            <div><dt>{{ $t('llm.baseUrl') }}</dt><dd :title="provider.baseUrl">{{ provider.baseUrl }}</dd></div>
+            <div><dt>{{ $t('llm.secretEnv') }}</dt><dd>{{ provider.apiKeyEnv }}</dd></div>
+            <div>
+              <dt>{{ $t('llm.secretStatus') }}</dt>
+              <dd :class="provider.configured ? 'text-ok' : 'text-warn'">
+                {{ provider.configured ? $t('llm.configured') : $t('llm.unconfigured') }}
+              </dd>
+            </div>
+          </dl>
+          <div v-if="testResults[provider.id]" class="test-result" :class="testResults[provider.id]?.reachable ? 'ok' : 'bad'">
+            <span>{{ testResults[provider.id]?.reachable ? $t('llm.connectionSuccess') : errorCategoryText(testResults[provider.id]?.errorCategory) }}</span>
+            <b>{{ Math.round(testResults[provider.id]?.latencyMs || 0) }} ms</b>
+          </div>
+          <div class="provider-actions">
+            <button class="btn sm" :disabled="testingId === provider.id" @click="runTest(provider)">
+              {{ testingId === provider.id ? $t('llm.testing') : $t('llm.testConnection') }}
+            </button>
+            <button class="btn sm" @click="openEdit(provider)">{{ $t('llm.edit') }}</button>
+            <button class="btn sm danger-text" :disabled="deletingId === provider.id" @click="removeProvider(provider)">
+              {{ deletingId === provider.id ? $t('llm.deleting') : $t('llm.delete') }}
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div
+      v-if="formOpen"
+      ref="editorOverlay"
+      class="provider-editor-overlay"
+      tabindex="-1"
+      @click.self="closeForm"
+      @keydown.esc="closeForm"
+      @keydown.tab="trapEditorFocus"
+    >
+    <section
+      class="card editor-card"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Provider editor"
+    >
+      <div class="editor-head">
+        <div>
+          <span class="eyebrow">{{ editingId ? $t('llm.editProvider') : $t('llm.newProvider') }}</span>
+          <h3>{{ editingId ? form.displayName || 'Provider' : $t('llm.connectProvider') }}</h3>
+        </div>
+        <button class="btn sm ghost" @click="closeForm">{{ $t('llm.close') }}</button>
+      </div>
+
+      <div class="preset-row">
+        <button
+          v-for="preset in presets"
+          :key="preset.key"
+          type="button"
+          :class="['preset-button', { active: selectedPreset === preset.key }]"
+          @click="applyPreset(preset.key)"
+        >
+          {{ preset.key === 'custom' ? $t('llm.customPreset') : preset.label }}
         </button>
       </div>
+
+      <form class="provider-form" @submit.prevent="saveProvider">
+        <label>
+          <span>{{ $t('llm.displayName') }}</span>
+          <input ref="firstProviderInput" v-model.trim="form.displayName" data-testid="provider-display-name" class="input" maxlength="160" required :placeholder="$t('llm.displayNamePlaceholder')">
+        </label>
+        <label>
+          <span>{{ $t('llm.uniqueName') }}</span>
+          <input v-model.trim="form.name" class="input mono" maxlength="100" required :placeholder="$t('llm.uniqueNamePlaceholder')">
+        </label>
+        <label class="wide">
+          <span>{{ $t('llm.baseUrl') }}</span>
+          <input v-model.trim="form.baseUrl" class="input mono" maxlength="500" required placeholder="https://api.deepseek.com/v1">
+        </label>
+        <label>
+          <span>{{ $t('llm.defaultModel') }}</span>
+          <input v-model.trim="form.defaultModel" class="input mono" maxlength="200" required :placeholder="$t('llm.defaultModelPlaceholder')">
+        </label>
+        <label>
+          <span>{{ $t('llm.secretEnvName') }}</span>
+          <input v-model.trim="form.apiKeyEnv" class="input mono" maxlength="160" required :placeholder="$t('llm.secretEnvNamePlaceholder')">
+        </label>
+        <label>
+          <span>{{ $t('llm.timeoutSeconds') }}</span>
+          <input v-model.number="form.timeoutSeconds" class="input" type="number" min="1" max="86400" required>
+        </label>
+        <label class="toggle-field">
+          <input v-model="form.enabled" type="checkbox">
+          <span>{{ $t('llm.enableProvider') }}</span>
+        </label>
+        <label class="wide secret-field">
+          <span>{{ $t('llm.apiKey') }} <i>{{ editingId ? $t('llm.apiKeyRetain') : $t('llm.apiKeyLater') }}</i></span>
+          <input v-model="form.apiKey" class="input mono" type="password" autocomplete="new-password" :placeholder="$t('llm.apiKeyPlaceholder')">
+          <small>{{ $t('llm.apiKeySecurityHint') }}</small>
+        </label>
+        <div v-if="formError" class="form-error wide">{{ formError }}</div>
+        <div class="form-actions wide">
+          <button type="button" class="btn" :disabled="saving" @click="closeForm">{{ $t('llm.cancel') }}</button>
+          <button type="submit" data-testid="save-provider" class="btn brand" :disabled="saving || !formValid">
+            {{ saving ? $t('llm.saving') : $t('llm.saveProvider') }}
+          </button>
+        </div>
+      </form>
+    </section>
     </div>
 
-    <div class="usage-grid">
-      <div class="card usage-card">
-        <div class="lbl">{{ $t('llm.todayCalls') }}</div>
-        <div class="v">{{ todayCalls }}</div>
-        <div class="sub">↑ {{ dayOverDay }}% · ¥{{ todayCost }}</div>
+    <section class="card section-card routes-section">
+      <div class="card-hd section-head">
+        <div>
+          <h3>{{ $t('llm.routesSection') }}</h3>
+          <span class="hint">{{ $t('llm.routesHint') }}</span>
+        </div>
+        <span class="count-chip">{{ $t('llm.routeCount', { n: 5 }) }}</span>
       </div>
-      <div class="card usage-card">
-        <div class="lbl">{{ $t('llm.monthCalls') }}</div>
-        <div class="v">{{ monthCalls.toLocaleString() }}</div>
-        <div class="sub">¥{{ monthCost }} / ¥{{ monthBudget }}</div>
-      </div>
-      <div class="card usage-card">
-        <div class="lbl">{{ $t('llm.avgLatency') }}</div>
-        <div class="v">{{ avgLatency }}<span style="font-size:12px;color:var(--muted);font-weight:500">ms</span></div>
-        <div class="sub">P95: {{ p95 }}</div>
-      </div>
-      <div class="card usage-card">
-        <div class="lbl">{{ $t('llm.tokenThroughput') }}</div>
-        <div class="v">{{ tokenM }}<span style="font-size:12px;color:var(--muted);font-weight:500">M</span></div>
-        <div class="sub">{{ $t('llm.in1_6') }} / {{ $t('llm.out0_8') }}</div>
-      </div>
-    </div>
 
-    <div class="card mb-16">
-      <div class="card-hd">
-        <h3>{{ $t('llm.providersList') }}</h3>
-        <span class="hint">{{ $t('llm.providersHint') }}</span>
+      <div v-if="loading" class="state-box">{{ $t('llm.loadingRoutes') }}</div>
+      <div v-else-if="!routesReady" class="state-box empty-state" role="alert">
+        <b>{{ $t('llm.routesUnavailable') }}</b>
+        <span>{{ $t('llm.routesUnavailableHint') }}</span>
+        <button class="btn" @click="loadAll">{{ $t('llm.retry') }}</button>
       </div>
-      <div style="padding:14px 18px">
-        <div class="prov-list">
-          <div v-for="(p, i) in providers" :key="p.name" class="prov-card">
-            <div class="av-sm" :style="{ background: p.color }">{{ p.initials }}</div>
+      <div v-else class="route-grid">
+        <article v-for="route in routeCards" :key="route.key" class="route-card">
+          <div class="route-head">
             <div>
-              <div class="nm">{{ p.displayName }}</div>
-              <div class="md">{{ p.model }} · {{ p.role === 'main' ? $t('llm.main') : $t('llm.backup') }}</div>
+              <span class="route-index">{{ route.order }}</span>
+              <h4>{{ $t(route.labelKey) }}</h4>
+              <p>{{ $t(route.descriptionKey) }}</p>
             </div>
-            <div class="url">{{ p.url }}</div>
-            <span :class="['chip', p.role === 'main' ? 'ok' : (p.status === 'unconfigured' ? 'warn' : '')]">
-              <span class="dot"></span>
-              {{ p.role === 'main' ? $t('llm.main') : (p.status === 'unconfigured' ? $t('llm.noKey') : $t('llm.backup')) }}
-            </span>
-            <div style="display:flex;gap:6px">
-              <button v-if="p.status !== 'unconfigured'" class="btn sm" @click="editProvider(i)">{{ $t('common.edit') }}</button>
-              <button v-else class="btn sm" @click="configureProvider(i)">{{ $t('llm.configure') }}</button>
-              <button class="btn sm ghost" style="color:var(--err)" @click="deleteProvider(i)">{{ $t('common.delete') }}</button>
+            <span>{{ $t('llm.nodeCount', { n: route.entries.length }) }}</span>
+          </div>
+
+          <div v-if="route.entries.length === 0" class="route-empty">{{ $t('llm.routeNotConfigured') }}</div>
+          <div v-else class="route-chain">
+            <div v-for="(entry, index) in route.entries" :key="`${entry.providerId}-${index}`" class="route-entry">
+              <span class="priority">{{ index + 1 }}</span>
+              <div class="route-provider">
+                <b>{{ providerName(entry.providerId) }}</b>
+                <input v-model.trim="entry.modelOverride" class="mini-input mono" :placeholder="$t('llm.modelOverridePlaceholder')">
+              </div>
+              <label class="mini-toggle"><input v-model="entry.enabled" type="checkbox">{{ $t('llm.enable') }}</label>
+              <div class="order-actions">
+                <button class="icon-button" :disabled="index === 0" :title="$t('llm.moveUp')" @click="moveRouteEntry(route, index, -1)">↑</button>
+                <button class="icon-button" :disabled="index === route.entries.length - 1" :title="$t('llm.moveDown')" @click="moveRouteEntry(route, index, 1)">↓</button>
+                <button class="icon-button remove" :title="$t('llm.remove')" @click="removeRouteEntry(route, index)">×</button>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
 
-    <div class="card mb-16">
-      <div class="card-hd">
-        <h3>{{ $t('llm.skillUsage30d') }}</h3>
-        <span class="hint">{{ $t('llm.sortedByCalls') }}</span>
+          <div class="route-footer">
+            <select v-model="route.pendingProviderId" class="input compact-select">
+              <option value="">{{ $t('llm.addProviderOption') }}</option>
+              <option v-for="provider in availableProviders(route)" :key="provider.id" :value="provider.id">
+                {{ provider.displayName }}
+              </option>
+            </select>
+            <button class="btn sm" :disabled="!route.pendingProviderId" @click="addRouteEntry(route)">{{ $t('llm.join') }}</button>
+            <button class="btn sm brand" :disabled="savingRoute === route.key" @click="saveRoute(route)">
+              {{ savingRoute === route.key ? $t('llm.saving') : $t('llm.saveRoute') }}
+            </button>
+          </div>
+          <p v-if="routeErrors[route.key]" class="route-error">{{ routeErrors[route.key] }}</p>
+        </article>
       </div>
-      <table class="tbl skill-table">
-        <thead>
-          <tr>
-            <th>Skill</th>
-            <th>{{ $t('llm.pipelineStage') }}</th>
-            <th>{{ $t('llm.callCount') }}</th>
-            <th>{{ $t('llm.avgToken') }}</th>
-            <th>{{ $t('llm.avgLatencyCol') }}</th>
-            <th style="width:30%">{{ $t('llm.share') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="s in skills" :key="s.name">
-            <td><div class="nm">{{ s.name }}<small>{{ s.desc }}</small></div></td>
-            <td><span class="chip cyan">{{ s.stage }}</span></td>
-            <td class="mono">{{ s.calls.toLocaleString() }}</td>
-            <td class="mono">{{ s.token }}</td>
-            <td class="mono">{{ s.latency }}</td>
-            <td><div class="skill-bar"><span :style="{ width: s.share + '%' }"></span></div></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Add / Edit provider form -->
-    <div class="card form-card">
-      <div class="card-hd" style="margin:-8px 0 18px;padding:0;border:0">
-        <h3>{{ showEdit ? $t('llm.editProvider') : $t('llm.addProvider') }}</h3>
-        <button class="btn sm ghost" @click="cancelForm">{{ $t('common.cancel') }}</button>
-      </div>
-      <div class="form-grid">
-        <div class="field">
-          <label class="label">{{ $t('llm.providerName') }}</label>
-          <input class="input" :placeholder="$t('llm.providerNamePh')" v-model="form.name">
-          <p class="hint">{{ $t('llm.providerNameHint') }}</p>
-        </div>
-        <div class="field">
-          <label class="label">{{ $t('llm.modelIdentifier') }}</label>
-          <input class="input" :placeholder="$t('llm.modelIdentifierPh')" v-model="form.model">
-          <p class="hint">{{ $t('llm.modelIdentifierHint') }}</p>
-        </div>
-        <div class="field" style="grid-column:span 2">
-          <label class="label">{{ $t('llm.apiKey') }}</label>
-          <input class="input mono" type="password" placeholder="sk-..." v-model="form.apiKey">
-          <p class="hint">{{ $t('llm.apiKeyHint') }}</p>
-        </div>
-        <div class="field" style="grid-column:span 2">
-          <label class="label">{{ $t('llm.baseUrl') }}</label>
-          <input class="input mono" :placeholder="$t('llm.baseUrlPh')" v-model="form.baseUrl">
-          <p class="hint">{{ $t('llm.baseUrlHint') }}</p>
-        </div>
-        <div class="field" style="grid-column:span 2;display:flex;align-items:center;gap:14px;padding:12px 14px;background:var(--bg-sub);border-radius:8px">
-          <input type="checkbox" id="asmain" v-model="form.setAsMain" style="accent-color:var(--brand)">
-          <label for="asmain" style="font-size:13px;color:var(--fg)"><b>{{ $t('llm.setAsMain') }}</b> {{ $t('llm.replaceDeepSeek') }}</label>
-        </div>
-      </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;padding-top:18px;border-top:1px solid var(--border)">
-        <button class="btn" @click="cancelForm">{{ $t('common.cancel') }}</button>
-        <button class="btn" @click="testFormConn" :disabled="!form.name || testingForm">{{ testingForm ? $t('common.loading') : $t('llm.testConn') }}</button>
-        <button class="btn brand" @click="saveProvider" :disabled="!form.name || !form.model">{{ $t('llm.saveProvider') }}</button>
-      </div>
-    </div>
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
-import { useI18n } from 'vue-i18n'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConfig, setConfigKey, saveApiKey, getLlmProviders } from '../api'
+import { useI18n } from 'vue-i18n'
+import {
+  createLlmProvider,
+  deleteLlmProvider,
+  getLlmProviders,
+  getLlmRoutes,
+  getLlmUsage,
+  testLlmProvider,
+  updateLlmProvider,
+  updateLlmProviderSecret,
+  updateLlmRoute,
+  type LlmConnectionTest,
+  type LlmProvider,
+  type LlmRouteEntry,
+  type LlmUsage,
+} from '../api'
 
-const { t } = useI18n()
+type RouteKey = 'collection' | 'qualification' | 'strategy' | 'iteration' | 'default'
+interface RouteCard {
+  key: RouteKey
+  order: string
+  labelKey: string
+  descriptionKey: string
+  entries: LlmRouteEntry[]
+  pendingProviderId: string
+}
 
-// Live metrics — driven by /api/llm/providers payload
-interface LlmUsage { todayCalls: number; todayCost: number; monthCalls: number; monthCost: number; monthBudget: number; avgLatency: number; p95: string; tokenMillions: number; tokenIn: number; tokenOut: number; latency: string; successRate: string; apiKeyMasked: string; dayOverDay: number }
-interface LlmProvider { name: string; displayName: string; initials: string; model: string; baseUrl: string; url: string; color: string; role: 'main' | 'backup'; status: 'active' | 'unconfigured' }
-interface LlmSkill  { name: string; desc: string; stage: string; calls: number; token: number; latency: string; share: number }
+const routeMeta: Array<Omit<RouteCard, 'entries' | 'pendingProviderId'>> = [
+  { key: 'collection', order: '01', labelKey: 'llm.routeCollection', descriptionKey: 'llm.routeCollectionDesc' },
+  { key: 'qualification', order: '02', labelKey: 'llm.routeQualification', descriptionKey: 'llm.routeQualificationDesc' },
+  { key: 'strategy', order: '03', labelKey: 'llm.routeStrategy', descriptionKey: 'llm.routeStrategyDesc' },
+  { key: 'iteration', order: '06', labelKey: 'llm.routeIteration', descriptionKey: 'llm.routeIterationDesc' },
+  { key: 'default', order: '—', labelKey: 'llm.routeDefault', descriptionKey: 'llm.routeDefaultDesc' },
+]
 
-const usage = ref<LlmUsage | null>(null)
+const presets = [
+  { key: 'deepseek', label: 'DeepSeek', name: 'deepseek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+  { key: 'openai', label: 'OpenAI', name: 'openai', displayName: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4.1-mini', apiKeyEnv: 'OPENAI_API_KEY' },
+  { key: 'qwen', label: '通义千问', name: 'qwen', displayName: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-plus', apiKeyEnv: 'DASHSCOPE_API_KEY' },
+  { key: 'custom', label: '自定义', name: '', displayName: '', baseUrl: '', defaultModel: '', apiKeyEnv: 'CUSTOM_LLM_API_KEY' },
+] as const
+
 const providers = ref<LlmProvider[]>([])
-const skills = ref<LlmSkill[]>([])
-const todayCalls = computed(() => usage.value?.todayCalls ?? 0)
-const todayCost = computed(() => usage.value?.todayCost ?? 0)
-const monthCalls = computed(() => usage.value?.monthCalls ?? 0)
-const monthCost = computed(() => usage.value?.monthCost ?? 0)
-const monthBudget = computed(() => usage.value?.monthBudget ?? 500)
-const avgLatency = computed(() => usage.value?.avgLatency ?? 0)
-const p95 = computed(() => usage.value?.p95 ?? '—')
-const tokenM = computed(() => usage.value?.tokenMillions ?? 0)
-const tokenIn = computed(() => usage.value?.tokenIn ?? 0)
-const tokenOut = computed(() => usage.value?.tokenOut ?? 0)
-const latency = computed(() => usage.value?.latency ?? '—')
-const successRate = computed(() => usage.value?.successRate ?? '—')
-const apiKeyMasked = computed(() => usage.value?.apiKeyMasked ?? '')
-const dayOverDay = computed(() => usage.value?.dayOverDay ?? 0)
+const { t } = useI18n()
+const usage = reactive<LlmUsage>({ requestCount: 0, successCount: 0, failureCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, fallbackCount: 0, averageLatencyMs: 0 })
+const routeCards = ref<RouteCard[]>(routeMeta.map(item => ({ ...item, entries: [], pendingProviderId: '' })))
+const loading = ref(true)
+const routesReady = ref(false)
+const serviceError = ref('')
+const formOpen = ref(false)
+const editorOverlay = ref<HTMLElement | null>(null)
+const firstProviderInput = ref<HTMLInputElement | null>(null)
+let editorRestoreTarget: HTMLElement | null = null
+const editingId = ref<string | null>(null)
+const selectedPreset = ref('custom')
+const saving = ref(false)
+const testingId = ref('')
+const deletingId = ref('')
+const savingRoute = ref('')
+const formError = ref('')
+const testResults = reactive<Record<string, LlmConnectionTest | undefined>>({})
+const routeErrors = reactive<Record<string, string>>({})
+const form = reactive({ name: '', displayName: '', baseUrl: '', defaultModel: '', apiKeyEnv: 'CUSTOM_LLM_API_KEY', timeoutSeconds: 30, enabled: true, apiKey: '' })
 
-const latencyColor = ref('var(--ok)')
-const successColor = ref('var(--ok)')
-const testing = ref(false)
-const testingForm = ref(false)
+const configuredCount = computed(() => providers.value.filter(provider => provider.configured).length)
+const successRate = computed(() => usage.requestCount ? `${Math.round((usage.successCount / usage.requestCount) * 100)}%` : '—')
+const formValid = computed(() => Boolean(form.name && form.displayName && form.baseUrl && form.defaultModel && /^[A-Z][A-Z0-9_]*$/.test(form.apiKeyEnv) && form.timeoutSeconds > 0))
 
-const mainProvider = computed(() => providers.value.find(p => p.role === 'main'))
+function errorMessage(error: unknown): string {
+  const candidate = error as { response?: { data?: { detail?: string | { message?: string } } }; message?: string }
+  const detail = candidate.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  return detail?.message || candidate.message || t('llm.unknownError')
+}
 
-const showEdit = ref(false)
-const editingIndex = ref<number | null>(null)
-const form = reactive({ name: '', model: '', apiKey: '', baseUrl: '', setAsMain: false })
+function initials(value: string): string {
+  return value.trim().split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase() || 'AI'
+}
 
 function resetForm() {
-  form.name = ''; form.model = ''; form.apiKey = ''; form.baseUrl = ''; form.setAsMain = false
-  showEdit.value = false
-  editingIndex.value = null
+  Object.assign(form, { name: '', displayName: '', baseUrl: '', defaultModel: '', apiKeyEnv: 'CUSTOM_LLM_API_KEY', timeoutSeconds: 30, enabled: true, apiKey: '' })
+  formError.value = ''
 }
 
-function editProvider(i: number) {
-  const p = providers.value[i]
-  if (!p) return
-  form.name = p.displayName
-  form.model = p.model
-  form.baseUrl = 'https://' + p.url
-  form.apiKey = ''
-  form.setAsMain = p.role === 'main'
-  editingIndex.value = i
-  showEdit.value = true
-  ElMessage.info(`编辑 ${p.displayName}`)
-}
-
-function configureProvider(i: number) {
-  const p = providers.value[i]
-  if (!p) return
-  form.name = p.displayName
-  form.model = p.model
-  form.baseUrl = 'https://' + p.url
-  editingIndex.value = i
-  showEdit.value = true
-  ElMessage.info(`配置 ${p.displayName}`)
-}
-
-async function deleteProvider(i: number) {
-  const p = providers.value[i]
-  if (!p) return
-  if (p.role === 'main') {
-    ElMessage.warning('主 Provider 不可删除，请先切换其他 Provider 为主')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(`确认删除 ${p.displayName}？此操作不可撤销`, '删除 Provider', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
-    })
-    providers.value.splice(i, 1)
-    ElMessage.success('已删除')
-  } catch { /* user cancelled */ }
-}
-
-function cancelForm() {
+async function openCreate() {
+  editorRestoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  editingId.value = null
+  selectedPreset.value = 'deepseek'
   resetForm()
+  applyPreset('deepseek')
+  formOpen.value = true
+  await nextTick()
+  firstProviderInput.value?.focus()
 }
 
-async function testFormConn() {
-  if (!form.name || !form.baseUrl) { ElMessage.warning('请填写 Provider 名称和 Base URL'); return }
-  testingForm.value = true
-  try {
-    // Try fetching the model list from the base URL
-    const resp = await fetch(form.baseUrl + '/models', { method: 'GET', signal: AbortSignal.timeout(5000) })
-    if (resp.ok) {
-      ElMessage.success(`${form.name} 连接测试通过 · 端点可达`)
-    } else {
-      ElMessage.warning(`${form.name} 端点返回 ${resp.status} — 可能需要 API Key`)
-    }
-  } catch {
-    ElMessage.warning(`${form.name} 端点不可达 — 请检查 URL 和网络`)
-  } finally {
-    testingForm.value = false
+async function openEdit(provider: LlmProvider) {
+  editorRestoreTarget = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  editingId.value = provider.id
+  selectedPreset.value = 'custom'
+  Object.assign(form, { name: provider.name, displayName: provider.displayName, baseUrl: provider.baseUrl, defaultModel: provider.defaultModel, apiKeyEnv: provider.apiKeyEnv, timeoutSeconds: provider.timeoutSeconds, enabled: provider.enabled, apiKey: '' })
+  formError.value = ''
+  formOpen.value = true
+  await nextTick()
+  firstProviderInput.value?.focus()
+}
+
+async function closeForm() {
+  const restoreTarget = editorRestoreTarget
+  formOpen.value = false
+  editingId.value = null
+  editorRestoreTarget = null
+  resetForm()
+  await nextTick()
+  if (restoreTarget?.isConnected) restoreTarget.focus()
+}
+
+function trapEditorFocus(event: KeyboardEvent) {
+  const overlay = editorOverlay.value
+  if (!overlay) return
+  const selector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  const focusable = Array.from(overlay.querySelectorAll<HTMLElement>(selector))
+  if (!focusable.length) return
+  const first = focusable[0]!
+  const last = focusable[focusable.length - 1]!
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || !overlay.contains(active))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+    event.preventDefault()
+    first.focus()
   }
+}
+
+function applyPreset(key: string) {
+  const preset = presets.find(item => item.key === key)
+  if (!preset) return
+  selectedPreset.value = key
+  if (key === 'custom') return
+  Object.assign(form, { name: preset.name, displayName: preset.displayName, baseUrl: preset.baseUrl, defaultModel: preset.defaultModel, apiKeyEnv: preset.apiKeyEnv })
 }
 
 async function saveProvider() {
-  if (!form.name || !form.model) return
+  if (!formValid.value) return
+  saving.value = true
+  formError.value = ''
   try {
-    // Persist to mock backend
-    await setConfigKey('llm_model', form.model)
-    if (form.apiKey) await saveApiKey(form.apiKey)
-    if (form.setAsMain) await setConfigKey('llm_provider', form.name)
-
-    if (editingIndex.value !== null) {
-      const p = providers.value[editingIndex.value]
-      if (p) {
-        p.displayName = form.name
-        p.model = form.model
-        p.status = 'active'
-      }
-      ElMessage.success(`已更新 ${form.name}`)
-    } else {
-      providers.value.push({
-        name: form.name.toLowerCase().replace(/\s+/g, '_'),
-        displayName: form.name,
-        initials: form.name.slice(0, 2).toUpperCase(),
-        model: form.model,
-        url: form.baseUrl.replace(/^https?:\/\//, ''),
-        baseUrl: form.baseUrl,
-        color: 'linear-gradient(135deg, oklch(60% 0.14 200), oklch(60% 0.18 320))',
-        role: form.setAsMain ? 'main' : 'backup',
-        status: 'active',
-      })
-      ElMessage.success(`已添加 ${form.name}`)
-    }
-    resetForm()
-  } catch (e) {
-    ElMessage.error('保存失败：' + (e as Error).message)
-  }
-}
-
-async function testConnection() {
-  testing.value = true
-  try {
-    const { data } = await getConfig()
-    if (data?.has_api_key) {
-      ElMessage.success(`${mainProvider.value?.displayName || 'LLM'} 连接配置正常 · API Key 已配置`)
-      latencyColor.value = 'var(--ok)'
-      successColor.value = 'var(--ok)'
-    } else {
-      ElMessage.warning('API Key 未配置，请先设置')
-      latencyColor.value = 'var(--warn)'
-      successColor.value = 'var(--warn)'
-    }
-  } catch {
-    ElMessage.error('连接失败 — 请检查后端服务是否运行')
-    latencyColor.value = 'var(--err)'
-    successColor.value = 'var(--err)'
+    const wasEditing = editingId.value !== null
+    const payload = { name: form.name, displayName: form.displayName, protocol: 'openai_chat' as const, baseUrl: form.baseUrl, defaultModel: form.defaultModel, apiKeyEnv: form.apiKeyEnv, enabled: form.enabled, timeoutSeconds: Number(form.timeoutSeconds) }
+    const response = wasEditing
+      ? await updateLlmProvider(editingId.value!, payload)
+      : await createLlmProvider(payload)
+    const saved = response.data
+    if (!wasEditing) editingId.value = saved.id
+    if (form.apiKey) await updateLlmProviderSecret(saved.id, form.apiKey)
+    ElMessage.success(wasEditing ? t('llm.providerUpdated') : t('llm.providerAdded'))
+    closeForm()
+    await loadAll()
+  } catch (error) {
+    formError.value = errorMessage(error)
   } finally {
-    testing.value = false
+    saving.value = false
   }
 }
 
-function exportUsage() {
-  const csv = 'date,calls,cost\n' + Array.from({ length: 30 }, (_, i) =>
-    `2026-06-${String(i + 1).padStart(2, '0')},${Math.floor(Math.random() * 200 + 50)},${(Math.random() * 2).toFixed(2)}`
-  ).join('\n')
-  const blob = new Blob([csv], { type: 'text/csv' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url; a.download = `llm-usage-${new Date().toISOString().slice(0, 10)}.csv`; a.click()
-  URL.revokeObjectURL(url)
-  ElMessage.success('已下载使用量 CSV')
-}
-
-async function switchMain() {
-  const backupProviders = providers.value.filter(p => p.role !== 'main')
-  if (backupProviders.length === 0) { ElMessage.info('没有备用 Provider 可切换'); return }
-  const next = backupProviders[0]
+async function removeProvider(provider: LlmProvider) {
   try {
-    await ElMessageBox.confirm(`切换主 Provider 为 ${next.displayName}？需要重启 Pipeline 才能生效`, '切换', {
-      confirmButtonText: '切换', cancelButtonText: '取消', type: 'info',
-    })
-    await setConfigKey('llm_provider', next.name)
-    // Update local state
-    providers.value.forEach(p => p.role = p.name === next.name ? 'main' : 'backup')
-    ElMessage.success(`已切换主 Provider 为 ${next.displayName}`)
-  } catch { /* cancelled */ }
+    const references = providerRouteReferences(provider.id)
+    const confirmation = references.length
+      ? t('llm.deleteConfirmReferenced', { name: provider.displayName, routes: references.join(t('llm.routeReferenceSeparator')) })
+      : t('llm.deleteConfirm', { name: provider.displayName })
+    await ElMessageBox.confirm(confirmation, t('llm.deleteTitle'), { confirmButtonText: t('llm.delete'), cancelButtonText: t('llm.cancel'), type: 'warning' })
+    deletingId.value = provider.id
+    await deleteLlmProvider(provider.id)
+    ElMessage.success(t('llm.providerDeleted'))
+    await loadAll()
+  } catch (error) {
+    if ((error as string) !== 'cancel' && (error as string) !== 'close') ElMessage.error(errorMessage(error))
+  } finally {
+    deletingId.value = ''
+  }
 }
 
-async function loadLlm() {
+function providerRouteReferences(providerId: string): string[] {
+  return routeCards.value
+    .filter(route => route.entries.some(entry => entry.providerId === providerId))
+    .map(route => t(route.labelKey))
+}
+
+async function runTest(provider: LlmProvider) {
+  testingId.value = provider.id
   try {
-    const { data } = await getLlmProviders()
-    if (data) {
-      providers.value = data.providers ?? []
-      usage.value = data.usage ?? null
-      skills.value = data.skills ?? []
-    }
-  } catch {}
+    const { data } = await testLlmProvider(provider.id)
+    testResults[provider.id] = data
+    data.reachable ? ElMessage.success(t('llm.connectionTestPassed')) : ElMessage.warning(errorCategoryText(data.errorCategory))
+  } catch (error) {
+    ElMessage.error(t('llm.testFailed', { message: errorMessage(error) }))
+  } finally {
+    testingId.value = ''
+  }
 }
 
-onMounted(loadLlm)
+function errorCategoryText(category?: string): string {
+  const labels: Record<string, string> = {
+    configuration: 'llm.errorConfiguration',
+    authentication: 'llm.errorAuthentication',
+    timeout: 'llm.errorTimeout',
+    network: 'llm.errorNetwork',
+    rate_limit: 'llm.errorRateLimit',
+    invalid_request: 'llm.errorInvalidRequest',
+    upstream_server: 'llm.errorUpstreamServer',
+  }
+  return t(labels[category || ''] || 'llm.connectionFailed')
+}
+
+function providerName(providerId: string): string {
+  return providers.value.find(provider => provider.id === providerId)?.displayName || t('llm.deletedProvider')
+}
+
+function availableProviders(route: RouteCard) {
+  const used = new Set(route.entries.map(entry => entry.providerId))
+  return providers.value.filter(provider => !used.has(provider.id))
+}
+
+function addRouteEntry(route: RouteCard) {
+  if (!route.pendingProviderId) return
+  route.entries.push({ providerId: route.pendingProviderId, priority: (route.entries.length + 1) * 10, modelOverride: null, enabled: true })
+  route.pendingProviderId = ''
+}
+
+function removeRouteEntry(route: RouteCard, index: number) {
+  route.entries.splice(index, 1)
+}
+
+function moveRouteEntry(route: RouteCard, index: number, delta: number) {
+  const target = index + delta
+  if (target < 0 || target >= route.entries.length) return
+  const [entry] = route.entries.splice(index, 1)
+  if (entry) route.entries.splice(target, 0, entry)
+}
+
+async function saveRoute(route: RouteCard) {
+  savingRoute.value = route.key
+  routeErrors[route.key] = ''
+  try {
+    const entries = route.entries.map((entry, index) => ({ ...entry, priority: (index + 1) * 10, modelOverride: entry.modelOverride || null, enabled: entry.enabled !== false }))
+    const { data } = await updateLlmRoute(route.key, entries)
+    route.entries = data.providers.map(entry => ({ ...entry }))
+    ElMessage.success(t('llm.routeSaved', { route: t(route.labelKey) }))
+  } catch (error) {
+    routeErrors[route.key] = errorMessage(error)
+  } finally {
+    savingRoute.value = ''
+  }
+}
+
+async function loadAll() {
+  loading.value = true
+  routesReady.value = false
+  serviceError.value = ''
+  try {
+    const [providerResponse, routeResponse, usageResponse] = await Promise.all([getLlmProviders(), getLlmRoutes(), getLlmUsage()])
+    providers.value = providerResponse.data
+    Object.assign(usage, usageResponse.data)
+    const routeMap = new Map(routeResponse.data.map(route => [route.routeKey, route.providers]))
+    routeCards.value = routeMeta.map(meta => ({ ...meta, entries: (routeMap.get(meta.key) || []).map(entry => ({ ...entry })), pendingProviderId: '' }))
+    routesReady.value = true
+  } catch (error) {
+    serviceError.value = errorMessage(error)
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(loadAll)
 </script>
 
 <style scoped>
-.hero-prov { padding: 24px 28px; background: linear-gradient(135deg, oklch(96% 0.04 350), var(--surface) 70%); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 18px; display: grid; grid-template-columns: auto 1fr auto; gap: 22px; align-items: center; }
-.hero-prov .av { width: 64px; height: 64px; border-radius: 14px; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 20px; background: linear-gradient(135deg, oklch(58% 0.22 350), oklch(70% 0.14 200)); }
-.hero-prov h2 { font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.3px; }
-.hero-prov .model { font-size: 13px; color: var(--muted); font-family: var(--font-mono); margin-bottom: 12px; }
-.hero-prov .meta { display: flex; gap: 24px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
-.hero-prov .meta b { color: var(--fg); font-weight: 600; }
-
-.usage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
-.usage-card { padding: 14px 16px; }
-.usage-card .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); font-weight: 600; }
-.usage-card .v { font-size: 20px; font-weight: 700; font-family: var(--font-mono); letter-spacing: -0.4px; margin-top: 4px; }
-.usage-card .sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
-
-.prov-list { display: flex; flex-direction: column; gap: 10px; }
-.prov-card { padding: 16px 18px; display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 16px; align-items: center; }
-.prov-card .av-sm { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
-.prov-card .nm { font-weight: 600; font-size: 14px; }
-.prov-card .md { font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); margin-top: 2px; }
-.prov-card .url { font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); }
-
-.skill-table th, .skill-table td { padding: 10px 14px; font-size: 13px; }
-.skill-table .nm { font-weight: 500; }
-.skill-table .nm small { color: var(--muted); display: block; font-weight: 400; font-size: 11.5px; margin-top: 2px; }
-.skill-bar { width: 100%; height: 5px; background: var(--bg-sub); border-radius: 3px; overflow: hidden; }
-.skill-bar > span { display: block; height: 100%; background: var(--brand); }
-
-.form-card { padding: 24px; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.llm-page { max-width: 1440px; margin: 0 auto; }
+.head-actions, .provider-actions, .form-actions, .route-footer, .order-actions { display: flex; align-items: center; gap: 8px; }
+.notice { display: flex; justify-content: space-between; gap: 20px; padding: 15px 18px; border-radius: 10px; margin-bottom: 16px; }
+.error-notice { background: color-mix(in oklab, var(--err) 8%, var(--surface)); border: 1px solid color-mix(in oklab, var(--err) 28%, var(--border)); }
+.notice p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.metric-card { padding: 17px 18px; display: flex; flex-direction: column; gap: 5px; }
+.metric-card > span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 650; }
+.metric-card strong { font-family: var(--font-mono); font-size: 24px; letter-spacing: -.04em; }
+.metric-card em { font-size: 12px; color: var(--muted); font-style: normal; }
+.metric-card small { color: var(--muted); font-size: 11.5px; }
+.section-card { margin-bottom: 16px; overflow: hidden; }
+.section-head { display: flex; align-items: center; justify-content: space-between; padding: 17px 20px; }
+.section-head h3 { margin-bottom: 3px; }
+.count-chip, .status-pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.state-box { min-height: 150px; display: grid; place-items: center; color: var(--muted); }
+.empty-state { align-content: center; gap: 8px; padding: 30px; text-align: center; }
+.empty-state b { color: var(--fg); font-size: 15px; }
+.provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px; }
+.provider-card { border: 1px solid var(--border); border-radius: 12px; padding: 17px; background: var(--surface); }
+.provider-top { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; }
+.provider-avatar { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; color: white; background: linear-gradient(135deg, var(--brand), oklch(66% .15 205)); font-size: 12px; font-weight: 750; }
+.provider-title h4, .route-head h4 { margin: 0; font-size: 14px; }
+.provider-title code { color: var(--muted); font-size: 10.5px; }
+.status-pill.enabled { color: var(--ok); border-color: color-mix(in oklab, var(--ok) 35%, var(--border)); }
+.status-pill.disabled { color: var(--muted); background: var(--bg-sub); }
+.provider-details { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; margin: 17px 0; padding: 14px; border-radius: 9px; background: var(--bg-sub); }
+.provider-details div { min-width: 0; }
+.provider-details dt { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+.provider-details dd { margin: 0; font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.text-ok { color: var(--ok); }.text-warn { color: var(--warn); }.danger-text { color: var(--err); }
+.provider-actions { justify-content: flex-end; padding-top: 13px; border-top: 1px solid var(--border); }
+.test-result { display: flex; justify-content: space-between; padding: 8px 10px; margin: -4px 0 10px; border-radius: 7px; font-size: 11px; }
+.test-result.ok { color: var(--ok); background: color-mix(in oklab, var(--ok) 9%, transparent); }
+.test-result.bad { color: var(--err); background: color-mix(in oklab, var(--err) 8%, transparent); }
+.provider-editor-overlay { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 24px; background: color-mix(in oklab, black 42%, transparent); backdrop-filter: blur(3px); outline: none; }
+.editor-card { width: min(760px, 100%); max-height: min(860px, calc(100vh - 48px)); max-height: min(860px, calc(100dvh - 48px)); overflow-y: auto; padding: 22px; border-color: color-mix(in oklab, var(--brand) 25%, var(--border)); box-shadow: 0 24px 80px color-mix(in oklab, black 28%, transparent); }
+.editor-head { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 15px; }
+.editor-head h3 { margin: 4px 0 0; }.eyebrow { color: var(--brand); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
+.preset-row { display: flex; gap: 7px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.preset-button { border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 8px; padding: 7px 12px; cursor: pointer; font-size: 12px; }
+.preset-button.active { color: var(--brand); border-color: color-mix(in oklab, var(--brand) 45%, var(--border)); background: color-mix(in oklab, var(--brand) 6%, var(--surface)); }
+.provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 17px; }
+.provider-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 600; }
+.provider-form label > span i { color: var(--muted); font-style: normal; font-weight: 400; }
+.wide { grid-column: 1 / -1; }.toggle-field { flex-direction: row !important; align-items: center; padding-top: 24px; }.toggle-field input, .mini-toggle input { accent-color: var(--brand); }
+.secret-field { padding: 13px; border: 1px dashed var(--border); border-radius: 9px; background: var(--bg-sub); }.secret-field small { color: var(--muted); font-weight: 400; }
+.form-error, .route-error { color: var(--err); background: color-mix(in oklab, var(--err) 7%, transparent); padding: 9px 11px; border-radius: 7px; font-size: 12px; }
+.form-actions { justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--border); }
+.route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px; }
+.route-card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
+.route-card:last-child { grid-column: 1 / -1; }
+.route-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
+.route-head > div { position: relative; padding-left: 38px; }.route-index { position: absolute; left: 0; top: 0; font-family: var(--font-mono); font-weight: 750; color: var(--brand); }
+.route-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }.route-head > span { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.route-chain { display: flex; flex-direction: column; gap: 7px; }.route-entry { display: grid; grid-template-columns: auto 1fr auto auto; gap: 9px; align-items: center; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-sub); }
+.priority { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-family: var(--font-mono); font-size: 10px; background: var(--surface); border: 1px solid var(--border); }
+.route-provider { min-width: 0; display: grid; grid-template-columns: minmax(90px, auto) 1fr; gap: 8px; align-items: center; }.route-provider b { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-input { width: 100%; min-width: 80px; border: 1px solid var(--border); background: var(--surface); color: var(--fg); border-radius: 6px; padding: 5px 7px; font-size: 10.5px; outline: none; }.mini-input:focus { border-color: var(--brand); }
+.mini-toggle { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.icon-button { width: 25px; height: 25px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 6px; cursor: pointer; }.icon-button:disabled { opacity: .35; cursor: default; }.icon-button.remove { color: var(--err); }
+.route-empty { display: grid; place-items: center; min-height: 64px; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; font-size: 11px; }
+.route-footer { margin-top: 10px; }.compact-select { flex: 1; min-width: 0; padding-top: 6px; padding-bottom: 6px; font-size: 11px; }
+.route-error { margin: 8px 0 0; }
+@media (max-width: 1050px) { .summary-grid { grid-template-columns: repeat(2, 1fr); }.provider-grid, .route-grid { grid-template-columns: 1fr; }.route-card:last-child { grid-column: auto; } }
+@media (max-width: 680px) {
+  :global(.sidebar) { width: 64px !important; flex-basis: 64px !important; }
+  :global(.sb-brand) { justify-content: center; padding: 12px; }
+  :global(.sb-brand > span),
+  :global(.sb-section),
+  :global(.sb-link > span:not(.icn)),
+  :global(.sb-foot .user > div),
+  :global(.logout-btn) { display: none; }
+  :global(.sb-nav) { padding: 6px; }
+  :global(.sb-link) { justify-content: center; padding: 10px; }
+  :global(.sb-link.active::before) { left: -6px; }
+  :global(.sb-foot) { justify-content: center; padding: 10px 6px; }
+  :global(.topbar) { padding: 0 12px; }
+  :global(.search) { display: none; }
+  :global(.mock-banner) { align-items: flex-start; flex-wrap: wrap; padding: 8px 12px; }
+  :global(.api-mode-toggle) { width: 100%; margin-left: 0; }
+  .llm-page { padding: 16px 12px; }
+  .page-head { align-items: flex-start; }
+  .head-actions { width: 100%; }
+  .summary-grid { grid-template-columns: 1fr; }
+  .provider-grid, .route-grid { padding: 10px; }
+  .provider-details, .provider-form { grid-template-columns: 1fr; }
+  .wide { grid-column: auto; }
+  .provider-actions { flex-wrap: wrap; }
+  .route-entry { grid-template-columns: auto 1fr; }
+  .mini-toggle, .order-actions { grid-column: 2; }
+  .route-provider { grid-template-columns: 1fr; }
+  .route-footer { flex-wrap: wrap; }
+  .compact-select { flex-basis: 100%; }
+  .provider-editor-overlay { place-items: end center; padding: 10px max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+  .editor-card { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); padding: 18px 14px; border-radius: 14px 14px 8px 8px; }
+}
 </style>

@@ -3,13 +3,13 @@
     <div class="page-head">
       <div>
         <h1>{{ $t('accounts.title') }}</h1>
-        <p>{{ $t('accounts.subtitle') }}</p>
+        <p>{{ $t('accounts.subtitle', { total: accounts.length, healthy: loggedInCount }) }}</p>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn" @click="importCookie">{{ $t('accounts.importCookie') }}</button>
         <button class="btn" @click="batchCheck">{{ $t('accounts.batchCheck') }}</button>
-        <button class="btn" @click="openQR('tiktok')">📱 {{ $t('accounts.qrLoginTiktok') }}</button>
-        <button class="btn brand" @click="openQR('douyin')">📱 {{ $t('accounts.qrLoginDouyin') }}</button>
+        <button class="btn" @click="openLogin('tiktok')">{{ $t('accounts.interactiveLoginTiktok') }}</button>
+        <button class="btn brand" @click="openLogin('douyin')">{{ $t('accounts.interactiveLoginDouyin') }}</button>
       </div>
     </div>
 
@@ -22,6 +22,54 @@
         <b>{{ $t('accounts.riskTitle') }}</b> {{ $t('accounts.riskBody', { c1: '09:00', c2: '14:00', c3: '19:00', cm: 25, dm: 12, imin: 3, imax: 15 }) }}
       </div>
       <button class="btn sm" @click="viewPolicy">{{ $t('accounts.viewPolicy') }}</button>
+    </div>
+
+    <div class="capability-grid" aria-live="polite">
+      <div
+        v-for="platform in (['tiktok', 'douyin'] as const)"
+        :key="platform"
+        class="card capability-card"
+      >
+        <div class="capability-head">
+          <div>
+            <span class="eyebrow">{{ platform === 'tiktok' ? 'TikTok' : $t('accounts.douyin') }}</span>
+            <strong>{{ platform === 'tiktok' ? $t('accounts.fingerprintRuntime') : $t('accounts.playwrightRuntime') }}</strong>
+          </div>
+          <span
+            v-if="capabilities?.platforms[platform]"
+            :class="['provider-state', capabilities.platforms[platform].available ? 'ready' : 'blocked']"
+          >
+            {{ capabilities.platforms[platform].available
+              ? $t('accounts.providerReady')
+              : $t('accounts.providerBlocked') }}
+          </span>
+        </div>
+        <template v-if="capabilitiesLoading">
+          <span class="capability-copy">{{ $t('accounts.capabilityLoading') }}</span>
+        </template>
+        <template
+          v-else-if="capabilities?.platforms[platform]"
+          v-for="capability in [capabilities.platforms[platform]]"
+          :key="`${platform}-capability`"
+        >
+          <div class="capability-copy">
+            <template v-if="platform === 'tiktok'">
+              <span>{{ capability.message || $t('accounts.fingerprintReadyHint') }}</span>
+              <code v-if="capability.code">{{ capability.code }}</code>
+            </template>
+            <template v-else>
+              <span>
+                {{ $t('accounts.douyinConcurrency', { n: capability.maxConcurrency }) }}
+              </span>
+              <code v-if="capability.code">{{ capability.code }}</code>
+              <span v-if="capability.message">{{ capability.message }}</span>
+            </template>
+          </div>
+        </template>
+        <div v-else class="capability-copy error">
+          <span>{{ capabilitiesError || $t('accounts.capabilityError') }}</span>
+        </div>
+      </div>
     </div>
 
     <!-- Summary -->
@@ -62,13 +110,36 @@
       </div>
     </div>
 
-    <div class="acct-grid">
+    <ErrorBanner v-if="errorMessage" :message="errorMessage" @retry="loadAccounts" @dismiss="errorMessage = ''" />
+    <div v-if="loading" class="card account-state">正在加载账号数据…</div>
+    <EmptyState
+      v-else-if="filteredAccounts.length === 0"
+      icon="account"
+      :title="accounts.length === 0 ? '暂无账号' : '没有符合筛选条件的账号'"
+      :description="accounts.length === 0 ? '请使用右上角交互式浏览器登录添加真实平台账号。' : '请切换筛选条件后重试。'"
+    >
+      <button v-if="accounts.length === 0" class="btn brand" @click="openLogin('tiktok')">
+        {{ $t('accounts.interactiveLoginButton') }}
+      </button>
+    </EmptyState>
+    <div v-else class="acct-grid">
       <div v-for="a in filteredAccounts" :key="a.id" class="card acct-card">
         <div class="acct-head">
-          <div :class="['av', a.platform === 'douyin' ? 'dy' : 'tt']">{{ a.username.slice(-2).toUpperCase() }}</div>
+          <div :class="['av', a.platform === 'douyin' ? 'dy' : 'tt']">
+            <img
+              v-if="a.avatarUrl && !a.avatarFailed"
+              class="account-avatar"
+              :src="a.avatarUrl"
+              :alt="$t('accounts.avatarAlt', { name: accountTitle(a) })"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+              @error="a.avatarFailed = true"
+            >
+            <span v-else>{{ accountInitials(a) }}</span>
+          </div>
           <div style="flex:1;min-width:0">
-            <div class="nm">@{{ a.username }} <span :class="['status-pill', a.statusKey]" style="margin-left:6px"><span class="dot"></span> {{ $t('accounts.' + a.statusKey) }}</span></div>
-            <div class="handle">{{ a.nickname }}</div>
+            <div class="nm">{{ accountTitle(a) }} <span :class="['status-pill', a.statusKey]" style="margin-left:6px"><span class="dot"></span> {{ $t('accounts.' + a.statusKey) }}</span></div>
+            <div class="handle">{{ a.nickname }} · {{ $t('accounts.aliasShort') }} {{ a.username }}</div>
           </div>
           <span class="plat" :style="{ background: a.platform === 'douyin' ? 'var(--info-soft)' : 'var(--err-soft)', color: a.platform === 'douyin' ? 'oklch(45% 0.16 255)' : 'oklch(48% 0.22 25)' }">{{ a.platform === 'douyin' ? $t('accounts.douyin') : 'TikTok' }}</span>
         </div>
@@ -82,11 +153,41 @@
           {{ $t('accounts.lastLogin') }} <b>{{ (a.last_login_at || '').slice(0, 10) }} {{ (a.last_login_at || '').slice(11, 16) }}</b><br>
           {{ $t('accounts.todayUsage') }} <b :style="{ color: (a.today?.comments || 0) + (a.today?.dms || 0) > 0 ? 'var(--brand)' : 'inherit' }">{{ a.today?.comments || 0 }} {{ $t('accounts.comments') }} / {{ a.today?.dms || 0 }} {{ $t('accounts.dms') }}</b> · <span style="color:var(--muted)">{{ a.today?.currentTask || '—' }}</span>
         </div>
+        <div v-if="a.platform === 'tiktok'" :class="['account-provider', providerConfigured(a) ? 'ready' : 'blocked']">
+          <div class="account-provider-head">
+            <strong>{{ $t('accounts.fingerprintProfile') }}</strong>
+            <span>{{ providerConfigured(a) ? $t('accounts.configured') : $t('accounts.notConfigured') }}</span>
+          </div>
+          <template v-if="providerConfigured(a)">
+            <span>{{ $t('accounts.providerLabel') }} <code>{{ a.browserProvider }}</code></span>
+            <span>{{ $t('accounts.profileLabel') }} <code>{{ a.browserProfileId }}</code></span>
+          </template>
+          <template v-else>
+            <span>{{ $t('accounts.fingerprintMissing') }}</span>
+            <code>fingerprint_provider_unavailable</code>
+          </template>
+        </div>
+        <div v-else class="account-provider ready">
+          <div class="account-provider-head">
+            <strong>{{ $t('accounts.playwrightIsolation') }}</strong>
+            <span>{{ $t('accounts.providerReady') }}</span>
+          </div>
+          <span>
+            {{ $t('accounts.douyinConcurrency', { n: capabilities?.platforms.douyin.maxConcurrency ?? 1 }) }}
+          </span>
+        </div>
         <div class="acct-foot">
           <div class="left">
-            <button class="btn primary" v-if="a.statusKey === 'off'" @click="openQR(a.platform === 'douyin' ? 'douyin' : 'tiktok')">{{ $t('accounts.qrLogin') }}</button>
+            <button
+              v-if="a.statusKey === 'off'"
+              class="btn primary"
+              @click="openLogin(a.platform === 'douyin' ? 'douyin' : 'tiktok', a)"
+            >
+              {{ $t('accounts.interactiveLoginButton') }}
+            </button>
             <button class="btn" v-else @click="logout(a)">{{ $t('accounts.logout') }}</button>
             <button class="btn sm ghost" @click="checkCookie(a)">{{ $t('accounts.check') }}</button>
+            <button class="btn sm ghost" :data-testid="`edit-account-${a.id}`" @click="openAccountEditor(a)">{{ $t('accounts.editRemark') }}</button>
             <button class="btn sm ghost" style="color:var(--err)" @click="deleteAccount(a)">{{ $t('common.delete') }}</button>
           </div>
           <span style="font-size:11.5px;color:var(--muted)">{{ (a.today?.comments || 0) + (a.today?.dms || 0) }} / {{ (a.today?.comments || 0) + (a.today?.dms || 0) + 25 }}</span>
@@ -94,7 +195,7 @@
       </div>
     </div>
 
-    <div class="card mt-16">
+    <div v-if="accounts.length > 0" class="card mt-16">
       <div class="card-hd">
         <h3>{{ $t('accounts.todayActivityTitle') }}</h3>
         <span class="hint">{{ $t('accounts.refresh30s') }}</span>
@@ -112,7 +213,7 @@
         </thead>
         <tbody>
           <tr v-for="a in accounts" :key="a.id">
-            <td><div class="u-chip"><div class="u-avatar" :style="{ background: avBg(a) }">{{ a.username.slice(-2).toUpperCase() }}</div><span class="uname" :style="{ color: a.statusKey === 'off' ? 'var(--muted)' : '' }">@{{ a.username }}</span></div></td>
+            <td><div class="u-chip"><div class="u-avatar" :style="{ background: avBg(a) }"><img v-if="a.avatarUrl && !a.avatarFailed" class="account-avatar" :src="a.avatarUrl" :alt="$t('accounts.avatarAlt', { name: accountTitle(a) })" loading="lazy" referrerpolicy="no-referrer" @error="a.avatarFailed = true"><span v-else>{{ accountInitials(a) }}</span></div><span class="uname" :style="{ color: a.statusKey === 'off' ? 'var(--muted)' : '' }">{{ accountTitle(a) }}</span></div></td>
             <td class="mono" :style="{ color: a.statusKey === 'off' ? 'var(--muted)' : '' }">{{ a.today?.comments || 0 }} / 25</td>
             <td class="mono" :style="{ color: a.statusKey === 'off' ? 'var(--muted)' : '' }">{{ a.today?.dms || 0 }} / 12</td>
             <td class="mono" :style="{ color: (a.today?.replies || 0) > 0 ? 'var(--ok)' : '' }">{{ (a.today?.replies || 0) > 0 ? '+' + (a.today?.replies || 0) : '—' }}</td>
@@ -124,11 +225,48 @@
     </div>
   </div>
 
-  <QRScanModal
-    v-if="qrOpen"
-    :platform="qrPlatform"
-    @close="qrOpen = false"
-    @success="onQRSuccess"
+  <div
+    v-if="accountEditorOpen"
+    class="account-editor-overlay"
+    @click.self="closeAccountEditor"
+  >
+    <section class="card account-editor" role="dialog" aria-modal="true" :aria-label="$t('accounts.editRemark')">
+      <div class="account-editor-head">
+        <div>
+          <span class="eyebrow">{{ $t('accounts.localRemark') }}</span>
+          <h3>{{ editingAccount ? accountTitle(editingAccount) : '' }}</h3>
+        </div>
+        <button class="btn sm ghost" @click="closeAccountEditor">{{ $t('common.cancel') }}</button>
+      </div>
+      <label class="account-editor-field">
+        <span>{{ $t('accounts.displayName') }}</span>
+        <input
+          v-model="accountDisplayName"
+          data-testid="account-display-name-input"
+          class="input"
+          maxlength="100"
+          :placeholder="$t('accounts.displayNamePlaceholder')"
+          @keydown.enter.prevent="saveAccountDisplayName"
+          @keydown.esc="closeAccountEditor"
+        >
+        <small>{{ $t('accounts.displayNameHint', { alias: editingAccount?.username || '' }) }}</small>
+      </label>
+      <div class="account-editor-actions">
+        <button class="btn" :disabled="savingAccountName" @click="closeAccountEditor">{{ $t('common.cancel') }}</button>
+        <button data-testid="save-account-display-name" class="btn brand" :disabled="savingAccountName" @click="saveAccountDisplayName">
+          {{ savingAccountName ? $t('accounts.savingRemark') : $t('accounts.saveRemark') }}
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <InteractiveLoginModal
+    v-if="loginOpen"
+    :platform="loginPlatform"
+    :account-alias="loginAccountAlias"
+    :account-id="loginAccountId"
+    @close="loginOpen = false"
+    @success="onLoginSuccess"
   />
 </template>
 
@@ -136,8 +274,18 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getAccounts, deleteAccount as apiDeleteAccount, checkAccountSession, updateAccountCookies } from '../api'
-import QRScanModal from '../components/QRScanModal.vue'
+import {
+  getAccounts,
+  getPipelineCapabilities,
+  deleteAccount as apiDeleteAccount,
+  checkAccountSession,
+  updateAccountMetadata,
+  updateAccountCookies,
+} from '../api'
+import type { PipelineCapabilities } from '../types/pipeline'
+import InteractiveLoginModal from '../components/InteractiveLoginModal.vue'
+import EmptyState from '../components/EmptyState.vue'
+import ErrorBanner from '../components/ErrorBanner.vue'
 
 const { t } = useI18n()
 
@@ -147,10 +295,64 @@ interface Account {
   followers: number; videos: number; likes: number;
   today: { comments: number; dms: number; replies: number; currentTask: string } | null
   statusKey: 'on' | 'off' | 'warn'
+  browserProvider: string
+  browserProfileId: string
+  displayName: string
+  avatarUrl: string
+  avatarFailed: boolean
 }
 const accounts = ref<Account[]>([])
+const loading = ref(true)
+const errorMessage = ref('')
+const capabilities = ref<PipelineCapabilities | null>(null)
+const capabilitiesLoading = ref(true)
+const capabilitiesError = ref('')
 const tabFilter = ref<string>('all')
 const sortBy = ref<string>('recent')
+const accountEditorOpen = ref(false)
+const editingAccount = ref<Account | null>(null)
+const accountDisplayName = ref('')
+const savingAccountName = ref(false)
+
+function accountTitle(account: Account) {
+  return account.displayName || account.nickname || account.username
+}
+
+function accountInitials(account: Account) {
+  return accountTitle(account).trim().slice(0, 2).toUpperCase() || 'AC'
+}
+
+function openAccountEditor(account: Account) {
+  editingAccount.value = account
+  accountDisplayName.value = account.displayName
+  accountEditorOpen.value = true
+}
+
+function closeAccountEditor() {
+  if (savingAccountName.value) return
+  accountEditorOpen.value = false
+  editingAccount.value = null
+  accountDisplayName.value = ''
+}
+
+async function saveAccountDisplayName() {
+  const account = editingAccount.value
+  if (!account) return
+  savingAccountName.value = true
+  try {
+    await updateAccountMetadata(account.id, accountDisplayName.value)
+    await loadAccounts()
+    ElMessage.success(t('accounts.remarkSaved'))
+    accountEditorOpen.value = false
+    editingAccount.value = null
+    accountDisplayName.value = ''
+  } catch (error: unknown) {
+    const detail = (error as { response?: { data?: { detail?: string } }; message?: string })
+    ElMessage.error(detail.response?.data?.detail || detail.message || t('accounts.remarkSaveFailed'))
+  } finally {
+    savingAccountName.value = false
+  }
+}
 
 // Filtered + sorted accounts
 const filteredAccounts = computed(() => {
@@ -166,17 +368,24 @@ const filteredAccounts = computed(() => {
   return list
 })
 
-// QR scan modal state
-const qrOpen = ref(false)
-const qrPlatform = ref<'tiktok' | 'douyin'>('douyin')
-function openQR(p: 'tiktok' | 'douyin') {
-  qrPlatform.value = p
-  qrOpen.value = true
+// Interactive browser login modal state
+const loginOpen = ref(false)
+const loginPlatform = ref<'tiktok' | 'douyin'>('douyin')
+const loginAccountAlias = ref<string | undefined>()
+const loginAccountId = ref<number | null>(null)
+function openLogin(platform: 'tiktok' | 'douyin', account?: Account) {
+  loginPlatform.value = platform
+  loginAccountAlias.value = account?.username
+  loginAccountId.value = account?.id ?? null
+  loginOpen.value = true
 }
-async function onQRSuccess(username: string, platform: 'tiktok' | 'douyin') {
-  qrOpen.value = false
-  ElMessage.success(`已添加 ${platform === 'douyin' ? '抖音' : 'TikTok'} 账号 @${username}`)
-  await loadAccounts()  // refresh table
+async function onLoginSuccess(alias: string, platform: 'tiktok' | 'douyin') {
+  loginOpen.value = false
+  ElMessage.success(t('accounts.interactiveLoginSuccess', {
+    platform: platform === 'douyin' ? t('accounts.douyin') : 'TikTok',
+    alias,
+  }))
+  await Promise.all([loadAccounts(), loadCapabilities()])
 }
 
 async function importCookie() {
@@ -197,24 +406,33 @@ async function importCookie() {
 }
 
 async function batchCheck() {
+  if (accounts.value.length === 0) {
+    ElMessage.warning('暂无可检测账号')
+    return
+  }
   ElMessage.info('正在批量检测账号 Cookie 状态…')
-  let ok = 0, exp = 0
+  let ok = 0, exp = 0, unsupported = 0
   for (const a of accounts.value) {
     try {
       const { data } = await checkAccountSession(a.id)
-      if (data?.valid) ok++
+      if (data?.supported === false) unsupported++
+      else if (data?.valid) ok++
       else exp++
     } catch { exp++ }
   }
   // 重新从后端加载，确保状态持久化
-  await loadAccounts()
-  ElMessage.success(`检测完成：${ok} 个有效 / ${exp} 个已过期 / 共 ${accounts.value.length} 个`)
+  await Promise.all([loadAccounts(), loadCapabilities()])
+  ElMessage.success(t('accounts.batchCheckResult', { ok, expired: exp, unsupported }))
 }
 
 async function checkCookie(a: Account) {
   ElMessage.info(`正在检测 @${a.username}…`)
   try {
     const { data } = await checkAccountSession(a.id)
+    if (data?.supported === false) {
+      ElMessage.warning(t('accounts.sessionCheckUnsupported'))
+      return
+    }
     const ok = data?.valid
     // 重新从后端加载，确保状态持久化
     await loadAccounts()
@@ -261,10 +479,51 @@ function viewPolicy() {
   )
 }
 async function loadAccounts() {
+  loading.value = true
+  errorMessage.value = ''
   try {
     const { data } = await getAccounts()
-    if (Array.isArray(data)) accounts.value = data as Account[]
-  } catch {}
+    const raw = Array.isArray(data) ? data : []
+    accounts.value = raw.map((account: any) => ({
+      ...account,
+      browserProvider: String(account.browserProvider ?? account.browser_provider ?? ''),
+      browserProfileId: String(account.browserProfileId ?? account.browser_profile_id ?? ''),
+      displayName: String(account.displayName ?? account.display_name ?? ''),
+      avatarUrl: String(account.avatarUrl ?? account.avatar_url ?? ''),
+      avatarFailed: false,
+    })) as Account[]
+  } catch (error: unknown) {
+    const err = error as { response?: { data?: { detail?: string } }; message?: string }
+    accounts.value = []
+    errorMessage.value = err.response?.data?.detail || err.message || '账号数据加载失败，请检查后端连接。'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadCapabilities() {
+  capabilitiesLoading.value = true
+  capabilitiesError.value = ''
+  try {
+    const { data } = await getPipelineCapabilities()
+    capabilities.value = data
+  } catch (error: unknown) {
+    const detail = (error as {
+      response?: { data?: { detail?: string | { code?: string; message?: string } } }
+    })?.response?.data?.detail
+    const code = typeof detail === 'object' ? detail?.code : ''
+    const message = typeof detail === 'object'
+      ? detail?.message
+      : detail || (error as Error)?.message
+    capabilities.value = null
+    capabilitiesError.value = [code, message].filter(Boolean).join(': ')
+  } finally {
+    capabilitiesLoading.value = false
+  }
+}
+
+function providerConfigured(account: Account) {
+  return Boolean(account.browserProvider.trim() && account.browserProfileId.trim())
 }
 
 function fmtK(n: number) {
@@ -284,15 +543,26 @@ const douyinCount = computed(() => accounts.value.filter(a => a.platform === 'do
 const loggedInCount = computed(() => accounts.value.filter(a => a.status === 'logged_in').length)
 const expiredCount = computed(() => accounts.value.filter(a => a.status === 'expired').length)
 
-onMounted(async () => {
-  try {
-    const { data } = await getAccounts()
-    if (Array.isArray(data)) accounts.value = data as Account[]
-  } catch {}
+onMounted(() => {
+  void loadAccounts()
+  void loadCapabilities()
 })
 </script>
 
 <style scoped>
+.account-state { min-height: 160px; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+.capability-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+.capability-card { padding: 15px 17px; }
+.capability-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.capability-head > div { display: grid; gap: 3px; }
+.capability-head .eyebrow { font-size: 10px; color: var(--muted); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.capability-head strong { font-size: 13px; }
+.provider-state { display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px; border-radius: 5px; font-size: 10.5px; font-weight: 600; }
+.provider-state.ready { background: var(--ok-soft); color: var(--ok); }
+.provider-state.blocked { background: var(--err-soft); color: var(--err); }
+.capability-copy { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 10px; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.capability-copy code { color: var(--fg-2); font-family: var(--font-mono); font-size: 10.5px; }
+.capability-copy.error { color: var(--err); }
 .acct-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
 .sum-card { padding: 16px 18px; }
 .sum-card .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
@@ -314,6 +584,7 @@ onMounted(async () => {
 .acct-card { padding: 18px; position: relative; }
 .acct-head { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
 .acct-head .av { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 14px; }
+.account-avatar { width: 100%; height: 100%; display: block; border-radius: inherit; object-fit: cover; }
 .acct-head .av.tt { background: linear-gradient(135deg, oklch(58% 0.22 350), oklch(48% 0.22 350)); }
 .acct-head .av.dy { background: linear-gradient(135deg, oklch(58% 0.16 25), oklch(60% 0.22 350)); }
 .acct-head .nm { font-size: 14px; font-weight: 600; }
@@ -326,6 +597,15 @@ onMounted(async () => {
 
 .acct-meta { font-size: 11.5px; color: var(--muted); margin-bottom: 14px; line-height: 1.7; }
 .acct-meta b { color: var(--fg); font-weight: 600; }
+.account-provider { display: grid; gap: 5px; min-height: 78px; margin-bottom: 14px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 11px; color: var(--muted); }
+.account-provider.ready { background: var(--ok-soft); border-color: color-mix(in oklch, var(--ok) 20%, var(--border)); }
+.account-provider.blocked { background: var(--err-soft); border-color: color-mix(in oklch, var(--err) 20%, var(--border)); }
+.account-provider-head { display: flex; justify-content: space-between; gap: 8px; color: var(--fg-2); }
+.account-provider-head strong { font-size: 11.5px; }
+.account-provider-head span { font-weight: 600; }
+.account-provider.ready .account-provider-head span { color: var(--ok); }
+.account-provider.blocked .account-provider-head span { color: var(--err); }
+.account-provider code { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-2); overflow-wrap: anywhere; }
 
 .acct-foot { display: flex; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 1px solid var(--border); }
 .acct-foot .left { display: flex; gap: 6px; }
@@ -339,4 +619,33 @@ onMounted(async () => {
 .status-pill.off .dot { background: var(--err); }
 .status-pill.warn { background: var(--warn-soft); color: oklch(45% 0.16 75); }
 .status-pill.warn .dot { background: var(--warn); }
+
+.account-editor-overlay { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 24px; background: color-mix(in oklab, black 42%, transparent); backdrop-filter: blur(3px); }
+.account-editor { width: min(480px, 100%); padding: 22px; box-shadow: 0 24px 80px color-mix(in oklab, black 28%, transparent); }
+.account-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.account-editor-head .eyebrow { color: var(--brand); font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.account-editor-head h3 { margin: 4px 0 0; font-size: 17px; }
+.account-editor-field { display: grid; gap: 7px; font-size: 12px; font-weight: 600; }
+.account-editor-field small { color: var(--muted); font-weight: 400; line-height: 1.5; }
+.account-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
+
+@media (max-width: 980px) {
+  .acct-grid { grid-template-columns: repeat(2, 1fr); }
+  .acct-summary { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 680px) {
+  .page-head,
+  .risk-card,
+  .toolbar { align-items: flex-start; flex-direction: column; }
+  .page-head > div:last-child,
+  .toolbar .tabs-inline { flex-wrap: wrap; }
+  .capability-grid,
+  .acct-grid,
+  .acct-summary { grid-template-columns: 1fr; }
+  .acct-foot { align-items: flex-start; gap: 10px; flex-direction: column; }
+  .acct-foot .left { flex-wrap: wrap; }
+  .account-editor-overlay { place-items: end center; padding: 10px; }
+  .account-editor { padding: 18px 14px; border-radius: 14px 14px 8px 8px; }
+}
 </style>

@@ -77,13 +77,15 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '../stores/auth'
 import { getPipelineOverview } from '../api'
+import { resolvePostLoginTarget } from '../api/authSession'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 const { t } = useI18n()
 const loading = ref(false)
@@ -120,7 +122,7 @@ async function submit() {
       isRegister.value = false
     } else {
       await auth.login(form.username, form.password)
-      router.push('/dashboard')
+      router.push(resolvePostLoginTarget(route.query.redirect))
     }
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || e?.message || t('common.errNetwork'))
@@ -136,7 +138,7 @@ async function submitApiKey() {
   loading.value = true
   try {
     await auth.login(form.apiKey, form.apiKey)
-    router.push('/dashboard')
+    router.push(resolvePostLoginTarget(route.query.redirect))
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || t('common.errNetwork'))
   }

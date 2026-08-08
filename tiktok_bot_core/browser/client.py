@@ -1,6 +1,5 @@
-"""浏览器客户端 — Playwright 封装
+"""Playwright 浏览器客户端，单例管理 browser 实例。
 
-异步 Playwright，单例管理 browser 实例。
 提供 TikTok 常用操作的便捷方法。
 """
 
@@ -68,6 +67,20 @@ class BrowserClient:
     async def query_all(self, selector: str) -> list:
         return await self._page.query_selector_all(selector)
 
+    async def query_all_limited(self, selector: str, limit: int) -> list:
+        """Return at most ``limit`` elements without materializing the full DOM set."""
+        normalized_limit = max(0, int(limit))
+        if normalized_limit == 0:
+            return []
+        locator = self._page.locator(selector)
+        count = min(await locator.count(), normalized_limit)
+        handles = []
+        for index in range(count):
+            handle = await locator.nth(index).element_handle()
+            if handle is not None:
+                handles.append(handle)
+        return handles
+
     async def fill(self, selector: str, text: str) -> None:
         el = await self._page.query_selector(selector)
         if el:
@@ -89,6 +102,16 @@ class BrowserClient:
     async def attr(self, selector: str, name: str) -> str | None:
         el = await self._page.query_selector(selector)
         return await el.get_attribute(name) if el else None
+
+    async def screenshot(self, full_page: bool = False) -> bytes:
+        """截取当前页面，供视觉模型分析。"""
+        if not self._page:
+            raise RuntimeError("浏览器尚未初始化")
+        return await self._page.screenshot(type="jpeg", quality=75, full_page=full_page)
+
+    @property
+    def current_url(self) -> str:
+        return self._page.url if self._page else ""
 
     async def press_key(self, key: str) -> None:
         await self._page.keyboard.press(key)

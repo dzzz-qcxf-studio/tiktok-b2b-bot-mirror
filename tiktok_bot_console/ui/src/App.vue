@@ -101,26 +101,22 @@ import { apiMode, setApiMode } from './composables/useApiMode'
 //  1. Mode != 'real'  (mock / auto + env)  → info banner (intentional demo)
 //  2. Mode = 'real' + fallbackState.active → hard error banner (user asked for real, got fallback)
 //  3. Mode = 'real' + first request pending  → soft info (so user sees current mode)
-const showMockBanner = computed(() =>
-  apiMode.value !== 'real' ||
-  fallbackState.active ||
-  apiMode.value === 'real'
-)
+const showMockBanner = computed(() => true)
+const effectiveMock = computed(() => apiMode.value === 'mock' || (apiMode.value === 'auto' && import.meta.env.VITE_USE_MOCK === 'true'))
 const bannerVariant = computed(() => {
-  // Red when real was explicitly chosen but fallback was needed
-  if (apiMode.value === 'real' && fallbackState.active) return 'error'
-  if (apiMode.value === 'real') return 'info'
-  return 'mock'
+  if (fallbackState.active && apiMode.value === 'auto') return 'error'
+  if (effectiveMock.value) return 'mock'
+  return 'info'
 })
 const bannerTitle = computed(() => {
-  if (apiMode.value === 'real' && fallbackState.active) return t('common.backendUnreachable')
-  if (apiMode.value === 'real') return t('common.apiReal')
-  return t('common.mockMode')
+  if (fallbackState.active && apiMode.value === 'auto') return t('common.backendUnreachable')
+  if (effectiveMock.value) return t('common.mockMode')
+  return t('common.apiReal')
 })
 const bannerBody = computed(() => {
-  if (apiMode.value === 'real' && fallbackState.active) return t('common.backendUnreachableDetail')
-  if (apiMode.value === 'real') return t('common.realBackendNote')
-  return t('common.demoDataFromMock')
+  if (fallbackState.active && apiMode.value === 'auto') return t('common.backendUnreachableDetail')
+  if (effectiveMock.value) return t('common.demoDataFromMock')
+  return t('common.realBackendNote')
 })
 // re-render router-view when mode flips so views reload data
 watch(apiMode, () => { tick.value++ })
@@ -272,6 +268,12 @@ const crumbCurrent = computed(() => {
 }
 .mock-banner .dot { width: 7px; height: 7px; border-radius: 50%; background: oklch(72% 0.16 75); flex-shrink: 0; }
 .mock-banner b { color: oklch(38% 0.16 75); font-weight: 600; }
+.mock-banner.info { background: oklch(97% 0.018 225); color: oklch(43% 0.12 225); border-color: oklch(89% 0.055 225); }
+.mock-banner.info .dot { background: oklch(62% 0.15 225); }
+.mock-banner.info b { color: oklch(36% 0.14 225); }
+.mock-banner.error { background: oklch(96% 0.025 25); color: oklch(45% 0.17 25); border-color: oklch(87% 0.07 25); }
+.mock-banner.error .dot { background: var(--err); }
+.mock-banner.error b { color: oklch(38% 0.18 25); }
 .api-mode-toggle { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px; background: rgba(0,0,0,.04); border-radius: 8px; }
 .api-mode-toggle .lbl { font-size: 11px; color: var(--muted); padding: 0 6px; }
 .api-mode-toggle button { padding: 3px 10px; border: none; background: transparent; border-radius: 6px; font-size: 11.5px; color: var(--fg-2); cursor: pointer; font-weight: 500; }

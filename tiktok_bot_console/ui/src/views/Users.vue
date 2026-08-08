@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <h1>{{ $t('users.title') }}</h1>
-        <p>{{ $t('users.subtitle', { total: 1247, newToday: 47, qualified: 891 }) }}</p>
+        <p>{{ $t('users.subtitle', { total: kpis.total, newToday: kpis.newToday, qualified: kpis.qualified }) }}</p>
       </div>
       <div style="display:flex;gap:8px">
         <input ref="csvInputRef" type="file" accept=".csv" style="display:none" @change="onImportCsv">
@@ -121,6 +121,7 @@
             <th>{{ $t('users.status') }}</th>
             <th>{{ $t('users.persona') }}</th>
             <th>{{ $t('users.country') }}</th>
+            <th>{{ $t('users.profile') }}</th>
             <th>{{ $t('users.followers') }}</th>
             <th>{{ $t('users.score') }}</th>
             <th>{{ $t('users.lastAction') }}</th>
@@ -142,6 +143,14 @@
             <td><span :class="['status-pill', 'status-' + u.status]">{{ $t('status.' + u.status) }}</span></td>
             <td><span :class="['chip', u.personaClass]">{{ $t('persona.' + u.persona) }}</span></td>
             <td><span class="country-chip">{{ u.flag }} {{ u.country }}</span></td>
+            <td>
+              <a v-if="u.profile_url" :href="u.profile_url" target="_blank" rel="noopener"
+                 class="profile-link" :title="u.profile_url">
+                <span class="ext-icon">↗</span>
+                <span class="profile-host">{{ shortHost(u.profile_url) }}</span>
+              </a>
+              <span v-else class="muted">—</span>
+            </td>
             <td class="mono right">{{ u.followers }}</td>
             <td>
               <div class="score-cell">
@@ -160,8 +169,12 @@
       </table>
 
       <div v-if="filteredUsers.length > 0" class="paginate">
-        <span>{{ $t('users.pagination', { from: pageStart + 1, to: pageEnd, total: filteredUsers.length }) }}
+        <span>
+          {{ $t('users.pagination', { from: pageStart + 1, to: pageEnd, total: filteredUsers.length }) }}
           <span v-if="selectedCount > 0" style="margin-left:8px;color:var(--brand)">已选 {{ selectedCount }}</span>
+          <span v-if="(userTotal ?? 0) > users.length" style="margin-left:8px;color:var(--warn)">
+            · 已加载 {{ users.length }} / 全部 {{ userTotal }},可能未拉全
+          </span>
         </span>
         <div class="pages">
           <button @click="page = Math.max(1, page - 1)" :disabled="page === 1">‹</button>
@@ -205,6 +218,12 @@
             <option value="peer">peer / 同行</option>
           </select>
         </div>
+        <div class="field" style="margin-bottom:12px">
+          <label class="label" for="manualAddProfileUrl">主页链接</label>
+          <input id="manualAddProfileUrl" class="input" v-model="manualAdd.profile_url"
+                 placeholder="留空则自动按平台拼接（如 https://www.tiktok.com/@username）">
+          <div class="hint">可选；不填时系统会按 platform + username 自动拼接。</div>
+        </div>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
           <button class="btn" @click="openManualAdd = false">{{ $t('common.cancel') }}</button>
           <button class="btn brand" @click="submitManualAdd">{{ $t('users.addToQueue') }}</button>
@@ -247,8 +266,20 @@ const COLORS: string[] = [
   'linear-gradient(135deg, oklch(70% 0.10 180), oklch(70% 0.12 220))',
   'linear-gradient(135deg, oklch(70% 0.10 100), oklch(70% 0.14 130))',
 ]
-const COUNTRY_NAME: Record<string, string> = { US: '美国', GB: '英国', KR: '韩国', DE: '德国', CN: '中国', FR: '法国', PH: '菲律宾', BR: '巴西', JP: '日本', IN: '印度' }
-const COUNTRY_FLAG: Record<string, string> = { US: '🇺🇸', GB: '🇬🇧', KR: '🇰🇷', DE: '🇩🇪', CN: '🇨🇳', FR: '🇫🇷', PH: '🇵🇭', BR: '🇧🇷', JP: '🇯🇵', IN: '🇮🇳' }
+// 覆盖 mock 生成器 + 真后端可能入库的所有 ISO-3166-α2 国家。
+// 缺则 fallback 到原始 code + 🏳️ — 这是兜底,运行时应当不出现。
+const COUNTRY_NAME: Record<string, string> = {
+  US: '美国', GB: '英国', KR: '韩国', DE: '德国', CN: '中国', FR: '法国',
+  PH: '菲律宾', BR: '巴西', JP: '日本', IN: '印度',
+  VN: '越南', TH: '泰国', AU: '澳大利亚', CA: '加拿大', MX: '墨西哥',
+  IT: '意大利', ES: '西班牙', NL: '荷兰', PL: '波兰', TR: '土耳其',
+}
+const COUNTRY_FLAG: Record<string, string> = {
+  US: '🇺🇸', GB: '🇬🇧', KR: '🇰🇷', DE: '🇩🇪', CN: '🇨🇳', FR: '🇫🇷',
+  PH: '🇵🇭', BR: '🇧🇷', JP: '🇯🇵', IN: '🇮🇳',
+  VN: '🇻🇳', TH: '🇹🇭', AU: '🇦🇺', CA: '🇨🇦', MX: '🇲🇽',
+  IT: '🇮🇹', ES: '🇪🇸', NL: '🇳🇱', PL: '🇵🇱', TR: '🇹🇷',
+}
 const STATUS_COLOR: Record<string, string> = { qualified: 'oklch(42% 0.16 150)', pending: 'var(--fg-2)', contacted: 'oklch(45% 0.16 255)', replied: 'oklch(48% 0.22 350)', rejected: 'oklch(48% 0.22 25)' }
 
 const initialsOf = (s: string) => s.split('_').map(p => p[0]).join('').slice(0, 2).toUpperCase()
@@ -264,6 +295,7 @@ interface ApiUser {
   id: number; username: string; nickname: string; bio: string;
   follower_count: number; country: string; category: string;
   status: string; source: string; source_keyword: string; updated_at: string;
+  profile_url?: string; platform?: string;
 }
 interface DisplayUser {
   id: number; username: string; nickname: string; bio: string;
@@ -271,10 +303,16 @@ interface DisplayUser {
   persona: string; personaClass: string; flag: string; country: string;
   followers: string; score: number; lastAction: string;
   source: string; source_keyword: string; updated_at: string;
+  profile_url: string;
 }
 
 const users = ref<DisplayUser[]>([])
-const userStats = ref<{ total: number; new_today?: number; qualified: number; pending: number; contacted: number; replied: number; rejected: number } | null>(null)
+/** 后端 /api/users 返回的真实 total(不受 limit 影响),用于:
+ *  - paginate "1–25 / X" 的分母
+ *  - 与 stats.total 交叉校验(数据一致性)
+ *  - 当 userTotal > users.value.length 时提示"可能未拉全" */
+const userTotal = ref(0)
+const userStats = ref<{ total: number; new_today?: number; qualified: number; pending: number; contacted: number; replied: number; rejected: number; by_persona?: Record<string, number> } | null>(null)
 
 function projectUser(u: ApiUser, i: number): DisplayUser {
   return {
@@ -291,7 +329,25 @@ function projectUser(u: ApiUser, i: number): DisplayUser {
     lastAction: timeAgo(u.updated_at),
     source: u.source || '',
     source_keyword: u.source_keyword || '',
+    profile_url: u.profile_url || buildProfileUrl(u.platform || 'tiktok', u.username),
     updated_at: u.updated_at,
+  }
+}
+
+function buildProfileUrl(platform: string, username: string) {
+  const u = (username || '').replace(/^@/, '').trim()
+  if (!u) return ''
+  const p = (platform || 'tiktok').toLowerCase()
+  if (p === 'tiktok') return `https://www.tiktok.com/@${u}`
+  if (p === 'douyin') return `https://www.douyin.com/user/${u}`
+  return ''
+}
+
+function shortHost(url: string) {
+  try {
+    return new URL(url).host.replace(/^www\./, '')
+  } catch {
+    return url
   }
 }
 
@@ -315,21 +371,21 @@ const sourceKeywords = computed(() =>
   Array.from(new Set(users.value.map(u => u.source_keyword).filter(Boolean))).sort()
 )
 
-const statusOptions = computed(() => {
-  const counts: Record<string, number> = { all: users.value.length }
-  for (const u of users.value) counts[u.status] = (counts[u.status] || 0) + 1
-  return [
-    { value: '', label: t('common.all'), count: counts.all },
-    { value: 'qualified', label: t('status.qualified'), count: counts.qualified || 0, dot: STATUS_COLOR.qualified },
-    { value: 'pending', label: t('status.pending'), count: counts.pending || 0, dot: STATUS_COLOR.pending },
-    { value: 'contacted', label: t('status.contacted'), count: counts.contacted || 0, dot: STATUS_COLOR.contacted },
-    { value: 'replied', label: t('status.replied'), count: counts.replied || 0, dot: STATUS_COLOR.replied },
-    { value: 'rejected', label: t('status.rejected'), count: counts.rejected || 0, dot: STATUS_COLOR.rejected },
-  ]
-})
+const statusOptions = computed(() => [
+  { value: '',         label: t('common.all'),         count: kpis.value.total,     dot: undefined },
+  { value: 'qualified',label: t('status.qualified'),   count: kpis.value.qualified, dot: STATUS_COLOR.qualified },
+  { value: 'pending',  label: t('status.pending'),     count: kpis.value.pending,   dot: STATUS_COLOR.pending },
+  { value: 'contacted',label: t('status.contacted'),   count: kpis.value.contacted, dot: STATUS_COLOR.contacted },
+  { value: 'replied',  label: t('status.replied'),     count: kpis.value.replied,   dot: STATUS_COLOR.replied },
+  { value: 'rejected', label: t('status.rejected'),    count: kpis.value.rejected,  dot: STATUS_COLOR.rejected },
+])
 
 const personaOptions = ['distributor', 'buyer', 'peer']
-function personaCount(p: string) { return users.value.filter(u => u.persona === p).length }
+/** 数字走 stats 接口(by_persona),保证 chip 上的"经销商/买家/同行"与
+ *  subtitle / 表格翻页同源。stats 不可达时 kpis 已经 fallback 到本地算。 */
+function personaCount(p: string) {
+  return kpis.value.byPersona[p] ?? users.value.filter(u => u.persona === p).length
+}
 function togglePersona(p: string) { personaFilter.value = personaFilter.value === p ? '' : p }
 
 // KPI from filtered set + stats aggregate
@@ -354,20 +410,34 @@ const filteredUsers = computed(() => {
 const kpis = computed(() => {
   const all = users.value
   const s = userStats.value
-  // Use aggregate stats when available, fall back to derived counts
+  // 单一权威来源:服务端 /api/users/stats 返回的聚合。
+  // 仅在 stats 不可达(完全 fallback)时才用 users.value 算。
+  // 这样 subtitle / KPI / 表格翻页总页数严格自洽。
+  const fallbackNewToday = () => all.filter(u => {
+    const h = (Date.now() - new Date(u.updated_at).getTime()) / 36e5
+    return h < 24
+  }).length
+  const total = s?.total ?? all.length
+  const qualified = s?.qualified ?? all.filter(u => u.status === 'qualified').length
+  // by_persona 走 stats 接口,前端 chip 上的"经销商/买家/同行"数字就有
+  // 单一权威来源;stats 不可达时再 fallback 到本地算。
+  const fallbackByPersona = () => {
+    const r: Record<string, number> = { distributor: 0, buyer: 0, peer: 0, unknown: 0 }
+    for (const u of all) r[u.persona] = (r[u.persona] || 0) + 1
+    return r
+  }
   return {
-    total: s?.total ?? all.length,
-    newToday: s?.new_today ?? all.filter(u => {
-      const h = (Date.now() - new Date(u.updated_at).getTime()) / 36e5
-      return h < 24
-    }).length,
-    qualified: s?.qualified ?? all.filter(u => u.status === 'qualified').length,
-    pending: s?.pending ?? all.filter(u => u.status === 'pending').length,
+    total,
+    newToday: s?.new_today ?? fallbackNewToday(),
+    qualified,
+    pending:   s?.pending   ?? all.filter(u => u.status === 'pending').length,
     contacted: s?.contacted ?? all.filter(u => u.status === 'contacted').length,
-    replied: s?.replied ?? all.filter(u => u.status === 'replied').length,
-    rejected: s?.rejected ?? all.filter(u => u.status === 'rejected').length,
-    conversionRate: all.length ? ((all.filter(u => u.status === 'qualified').length / all.length) * 100).toFixed(1) + '%' : '0%',
-    replyRate: '14.6%',
+    replied:   s?.replied   ?? all.filter(u => u.status === 'replied').length,
+    rejected:  s?.rejected  ?? all.filter(u => u.status === 'rejected').length,
+    byPersona: s?.by_persona ?? fallbackByPersona(),
+    // 转化率 / 回复率用 stats 算的 total 算(避免分子分母口径不一致)
+    conversionRate: total ? ((qualified / total) * 100).toFixed(1) + '%' : '0%',
+    replyRate: total ? (( (s?.replied ?? all.filter(u => u.status === 'replied').length) / total) * 100).toFixed(1) + '%' : '0%',
   }
 })
 
@@ -428,14 +498,20 @@ function addSelectedToOutreach() {
 
 // Manual add — small dialog to add a single user (mock: just enqueues for now)
 const openManualAdd = ref(false)
-const manualAdd = reactive({ username: '', platform: 'tiktok', persona: 'distributor' })
+const manualAdd = reactive({ username: '', platform: 'tiktok', persona: 'distributor', profile_url: '' })
 async function submitManualAdd() {
   if (!manualAdd.username.trim()) { ElMessage.warning('用户名必填'); return }
   try {
-    await addUser({ username: manualAdd.username.trim(), platform: manualAdd.platform, category: manualAdd.persona })
+    await addUser({
+      username: manualAdd.username.trim(),
+      platform: manualAdd.platform,
+      category: manualAdd.persona,
+      profile_url: manualAdd.profile_url.trim() || undefined,
+    })
     queue.enqueue({ username: manualAdd.username.trim(), persona: manualAdd.persona, source: 'detail-add' })
     toast(`已添加用户 @${manualAdd.username} 并加入触达队列`, 'success')
     manualAdd.username = ''
+    manualAdd.profile_url = ''
     openManualAdd.value = false
     await load()  // refresh table
   } catch (e: any) {
@@ -443,7 +519,7 @@ async function submitManualAdd() {
   }
 }
 
-// CSV import — parse simple `username,country,followers,score` rows
+// CSV import — parse simple `username,country,followers,score,profile_url` rows
 const csvInputRef = ref<HTMLInputElement | null>(null)
 function onImportCsv(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
@@ -461,6 +537,7 @@ function onImportCsv(e: Event) {
     const _iC = header.indexOf('country')
     const _iF = header.indexOf('followers')
     const _iS = header.indexOf('score')
+    const iUrl = header.indexOf('profile_url')
     let added = 0
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i] || ''
@@ -470,15 +547,17 @@ function onImportCsv(e: Event) {
       queue.enqueue({ username, persona: 'distributor', source: 'detail-add' })
       added++
     }
-    toast(`已导入 ${added} 个用户到触达队列`, 'success')
+    toast(`已导入 ${added} 个用户到触达队列${iUrl >= 0 ? '（含 profile_url 列）' : ''}`, 'success')
     if (csvInputRef.value) csvInputRef.value.value = ''
   }
   reader.readAsText(file)
 }
 
 function exportCsv() {
-  const rows = filteredUsers.value.map(u => `${u.username},${u.country},${u.followers},${u.score}`).join('\n')
-  const blob = new Blob([`username,country,followers,score\n${rows}`], { type: 'text/csv' })
+  const rows = filteredUsers.value
+    .map(u => `${u.username},${u.country},${u.followers},${u.score},${u.profile_url || ''}`)
+    .join('\n')
+  const blob = new Blob([`username,country,followers,score,profile_url\n${rows}`], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url; a.download = `users-${new Date().toISOString().slice(0, 10)}.csv`; a.click()
@@ -488,14 +567,18 @@ function exportCsv() {
 
 async function load() {
   try {
-    // Fetch users + aggregate stats in parallel
+    // Fetch users + aggregate stats in parallel.
+    // 不传 limit:mock 模式返回全量(1247 条),与 stats 接口的 total 自洽;
+    // 真实后端会自己按 Query(le=500) 截断,但 total 永远是真实数(用于 paginate)。
     const [usersRes, statsRes] = await Promise.all([
-      getUsers({ limit: 200 }),
+      getUsers({}),
       getUserStats().catch(() => ({ data: null })),
     ])
     if (usersRes.data?.items?.length) {
       users.value = usersRes.data.items.map((u: ApiUser, i: number) => projectUser(u, i))
     }
+    // 后端 /api/users 返回的 total 是 SQL count,不受 limit/offset 影响
+    userTotal.value = usersRes.data?.total ?? users.value.length
     if (statsRes.data) userStats.value = statsRes.data
   } catch (e) {
     // Backend unreachable — leave empty; UI shows empty state
@@ -547,6 +630,19 @@ onMounted(load)
 .country-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--fg-2); }
 .flag { font-size: 13px; }
 
+.profile-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--brand); text-decoration: none; font-size: 12px;
+  max-width: 160px;
+}
+.profile-link:hover { text-decoration: underline; }
+.profile-link .ext-icon {
+  font-size: 11px; line-height: 1; opacity: .7;
+}
+.profile-host {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .paginate { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
 .paginate .pages { display: flex; gap: 2px; }
 .pages button { width: 28px; height: 28px; border: none; background: transparent; border-radius: 6px; font-size: 12.5px; color: var(--fg-2); cursor: pointer; }
@@ -558,6 +654,32 @@ onMounted(load)
 .empty-icon { font-size: 36px; opacity: .3; margin-bottom: 12px; }
 .empty-title { font-size: 14px; color: var(--fg-2); font-weight: 600; margin-bottom: 4px; }
 .empty-sub { font-size: 12.5px; margin-bottom: 16px; }
+
+/* Manual-add modal — styles scoped locally so .qr-overlay/.qr-modal here
+   render as a real dialog instead of falling back to document flow. */
+.qr-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .45);
+  display: grid; place-items: center; z-index: 100;
+  animation: qrFade .15s ease;
+}
+@keyframes qrFade { from { opacity: 0 } to { opacity: 1 } }
+
+.qr-modal {
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, .18);
+  overflow: hidden;
+}
+.qr-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.qr-hd h3 { font-size: 14px; font-weight: 600; margin: 0; }
+.qr-close {
+  border: none; background: transparent; font-size: 22px; line-height: 1;
+  color: var(--muted); cursor: pointer; padding: 0 4px;
+}
+.qr-close:hover { color: var(--fg); }
 
 .outreach-pill {
   position: fixed; right: 24px; bottom: 24px; z-index: 50;

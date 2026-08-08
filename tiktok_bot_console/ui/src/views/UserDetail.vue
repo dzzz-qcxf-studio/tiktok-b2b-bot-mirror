@@ -1,5 +1,11 @@
 <template>
   <div class="page">
+    <div class="back-row">
+      <button class="btn ghost" @click="goBack" :title="$t('common.back')">
+        <span aria-hidden="true">←</span>
+        <span>{{ $t('common.back') }}</span>
+      </button>
+    </div>
     <div class="profile">
       <div class="u-avatar lg">{{ username.slice(0, 2).toUpperCase() }}</div>
       <div>
@@ -17,6 +23,17 @@
         <div class="stat"><div class="v">{{ engagementPct }}%</div><div class="l">{{ $t('userDetail.engagement') }}</div></div>
       </div>
       <div style="display:flex;gap:8px">
+        <a v-if="profileUrl" :href="profileUrl" target="_blank" rel="noopener"
+           class="btn ghost profile-open" :title="profileUrl">
+          <span class="ext-icon">↗</span>
+          {{ $t('userDetail.openProfile') }}
+          <span class="profile-host">{{ shortHost(profileUrl) }}</span>
+        </a>
+        <button v-else class="btn ghost profile-open" disabled
+                :title="$t('userDetail.openProfileMissing')">
+          <span class="ext-icon">↗</span>
+          {{ $t('userDetail.openProfile') }}
+        </button>
         <button class="btn" @click="saveDraft">{{ $t('userDetail.saveDraft') }}</button>
         <button class="btn brand" @click="addToOutreach" :disabled="queuePendingForMe">{{ addToOutreachLabel }}</button>
       </div>
@@ -113,12 +130,23 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getWordcloud, getUserDetail } from '../api'
 import { useOutreachQueue, useDraftStore } from '../stores/actionStores'
 
 const route = useRoute()
+const router = useRouter()
+
+/** 返回用户列表：优先用浏览器历史回到来源页(保留筛选/分页),
+ *  若没有可回退历史(直接打开本 URL),则 push 到 /users。 */
+function goBack() {
+  if (window.history.length > 1) {
+    router.back()
+  } else {
+    router.push('/users')
+  }
+}
 const username = ref(String(route.params.username || 'aroma_house_us'))
 const activeTab = ref(0)
 const personaKeywords = ref<{ word: string; cls?: string }[]>([])
@@ -129,6 +157,7 @@ const drafts = useDraftStore()
 // UserDetail payload from /api/users/:username/detail
 interface UserDetail {
   username: string
+  profile_url?: string
   profile: { bio_zh: string; meta_zh: string; stats: { followers: number; videos: number; likes: number; engagement_pct: number } }
   breakdown: { name: string; v: number; cls: string }[]
   videos: { title: string; cls: string; views: string }[]
@@ -141,6 +170,7 @@ const followersCount = ref(0)
 const videosCount = ref(0)
 const likesCount = ref(0)
 const engagementPct = ref(0)
+const profileUrl = ref('')
 const breakdown = ref<{ name: string; v: number; cls: string }[]>([])
 const videos = ref<{ title: string; cls: string; views: string }[]>([])
 const timeline = ref<{ time: string; cls: string; who: string; desc: string; quote?: string }[]>([])
@@ -186,6 +216,7 @@ async function loadDetail() {
     videos.value = data.videos
     timeline.value = data.timeline
     strategy.value = data.strategy
+    profileUrl.value = data.profile_url || buildProfileUrl(username.value)
   } catch {}
 }
 
@@ -224,6 +255,21 @@ function fmtFollowers(n: number) {
   if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
   return String(n)
 }
+
+/** 兜底拼接主页链接：仅在 detail 接口未返回 profile_url 时使用。
+ *  默认按 tiktok 处理；如未来 UserDetail 暴露 platform 字段,优先用真值。 */
+function buildProfileUrl(username: string): string {
+  const u = (username || '').replace(/^@/, '').trim()
+  return u ? `https://www.tiktok.com/@${u}` : ''
+}
+
+function shortHost(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, '')
+  } catch {
+    return url
+  }
+}
 </script>
 
 <style scoped>
@@ -237,6 +283,12 @@ function fmtFollowers(n: number) {
 .profile .meta { color: var(--muted); font-size: 13.5px; }
 .profile .badges { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 .profile .stats { display: flex; gap: 28px; }
+
+.back-row { margin-bottom: 12px; }
+.profile-open { text-decoration: none; }
+.profile-open .ext-icon { font-size: 12px; opacity: .75; }
+.profile-open .profile-host { font-size: 11px; color: var(--muted); margin-left: 4px; }
+.profile-open:disabled { cursor: not-allowed; opacity: .6; }
 .stat .v { font-size: 22px; font-weight: 700; font-family: var(--font-mono); letter-spacing: -0.4px; }
 .stat .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
 

@@ -36,6 +36,10 @@ class EventType(str, Enum):
     PIPELINE_START = "pipeline.start"
     PIPELINE_END = "pipeline.end"
 
+    # Hermes 浏览器 Agent
+    BROWSE_STEP = "browse.step"
+    BROWSE_DONE = "browse.done"
+
 
 @dataclass
 class Event:
@@ -63,6 +67,7 @@ class EventBus:
         self._subscribers: dict[EventType, list[EventHandler]] = defaultdict(list)
         self._history: list[Event] = []
         self._max_history = 1000
+        self._pending: list[asyncio.Task[Any]] = []
 
     def subscribe(self, event_type: EventType, handler: EventHandler) -> None:
         self._subscribers[event_type].append(handler)
@@ -91,6 +96,46 @@ class EventBus:
         """获取事件历史"""
         items = [e for e in self._history if event_type is None or e.type == event_type]
         return items[-limit:]
+
+    def append_history(self, event: Event) -> None:
+        """同步、容错地把事件追加到 history（不发订阅者）。
+
+        Agent 循环里每一步都调用，避免阻塞主循环；订阅者可改用
+        `history(EventType.BROWSE_STEP)` 拉取。
+        """
+        try:
+            self._history.append(event)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+        except Exception:
+            logger.warning("append_history failed", exc_info=True)
+
+    def fire(self, event: Event) -> None:
+        """fire-and-forget：同步追加到 history，同时后台触发订阅者。
+
+        用于高频事件（BROWSE_STEP），主循环不等待订阅者完成。
+        派发任务被记入 _pending，调用方可以在循环末尾 gather 它们。
+        """
+        self.append_history(event)
+        handlers = self._subscribers.get(event.type, [])
+        if not handlers:
+            return
+
+        async def _dispatch() -> None:
+            await asyncio.gather(
+                *[h(event) for h in handlers], return_exceptions=True
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            logger.debug("fire dispatch skipped: no event loop")
+            return
+        if not loop.is_running():
+            loop.run_until_complete(_dispatch())
+            return
+        task = loop.create_task(_dispatch())
+        self._pending.append(task)
 
     def clear_history(self) -> None:
         self._history.clear()

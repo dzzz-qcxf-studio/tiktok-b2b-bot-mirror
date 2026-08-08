@@ -4,7 +4,7 @@ import logging
 import random
 
 from tiktok_bot_core.extensions.registry import ChannelPlugin
-from tiktok_bot_core.browser.client import get_browser
+from tiktok_bot_core.browser.providers import require_browser_client
 from tiktok_bot_core.platforms import PlatformType, get_platform
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class CommentChannel(ChannelPlugin):
         pt = PlatformType.parse(platform)
         pf = get_platform(pt)
 
-        browser = await get_browser()
+        browser = require_browser_client(config, platform=pt.value)
         try:
             await browser.navigate(pf.user_profile_url(target))
             await browser.wait(2000)
@@ -82,5 +82,8 @@ class CommentChannel(ChannelPlugin):
         finally:
             # 反封号行为模拟
             if random.random() < 0.3:
-                await browser.navigate(get_platform(pt).home_url)
-                await browser.wait(random.randint(2, 5))
+                try:
+                    await browser.navigate(get_platform(pt).home_url)
+                    await browser.wait(random.randint(2, 5))
+                except Exception:
+                    logger.warning("评论后清理行为失败", exc_info=True)

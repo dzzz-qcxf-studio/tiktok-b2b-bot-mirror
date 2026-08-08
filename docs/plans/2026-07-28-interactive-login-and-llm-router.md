@@ -473,7 +473,7 @@ it('cancels backend session before closing', async () => {
 
 ```powershell
 cd tiktok_bot_console/ui
-npm test -- --run src/components/InteractiveLoginModal.spec.ts
+npm exec vitest -- run --config vitest.task6.config.ts
 ```
 
 Expected: FAIL because component is absent and old component renders QR.
@@ -491,7 +491,7 @@ Expected: FAIL because component is absent and old component renders QR.
 **Step 4: Verify GREEN**
 
 ```powershell
-npm test -- --run src/components/InteractiveLoginModal.spec.ts
+npm exec vitest -- run --config vitest.task6.config.ts
 npm run build
 node scripts/smoke.mjs
 ```
@@ -1039,4 +1039,3 @@ Expected: API health is OK; UI returns HTTP 200.
 git add README.md docs tiktok_bot_console/ui/README.md
 git commit -m "docs: document interactive login and LLM routing"
 ```
-

@@ -1,0 +1,9 @@
+name: tiktok-browse
+version: "0.1.0"
+description: 让 Hermes 驱动已登录账号的浏览器，让 LLM 决定每一步 click/scroll/extract
+triggers:
+  - "用浏览器打开抖音"
+  - "让 AI 浏览抖音"
+  - "浏览器 Agent"
+tools_required:
+  - cli

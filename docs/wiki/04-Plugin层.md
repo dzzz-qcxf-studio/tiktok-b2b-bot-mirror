@@ -1,6 +1,7 @@
 # 04 — Plugin 层详解
 
 > 关联: [索引](00-索引.md) | [Core层](03-Core层.md) | [Pipeline](05-Pipeline.md)
+> 最后更新: 2026-08-02
 
 三类插件：Collector（搜集）、Channel（触达）、Filter（筛选）。
 
@@ -8,7 +9,7 @@
 
 | 插件 | 类名 | source 字段 | 策略 |
 | --- | --- | --- | --- |
-| 关键词搜索 | `KeywordCollector` | `keyword_search` | TikTok 搜索 API |
+| 关键词搜索 | `KeywordCollector` | `keyword_search` / 结构化证据 | 普通用户搜索；获客模式 Hermes 视频/评论优先、用户搜索辅助 |
 | 推荐流 | `RecommendationCollector` | `recommendation` | 用户主页推荐区 |
 | 竞品分析 | `CompetitorCollector` | `competitor` | 竞品粉丝/关注列表 |
 
@@ -19,6 +20,12 @@
 ```
 
 **文件位置：** `tiktok_bot_core/plugins/collectors/{keyword,recommendation,competitor}_collector.py`
+
+`KeywordCollector` 有两条兼容路径：普通配置保持旧的直接用户搜索返回格式；带
+`acquisition_mode=true` 时必须注入 `HermesEvidenceAgent`，共用同一个预算 Tracker，
+依次执行视频/评论取证和直接用户辅助。生产 DOM 查询使用 `query_all_limited()`，DOM
+产生的 URL 在导航前按 TikTok/抖音域名白名单校验。Collector 回传由受限能力生成的
+pages/LLM/duration/visited-video 权威指标；缺失或不一致时 Pipeline 整批 fail closed。
 
 **添加新 Collector：**
 ```python

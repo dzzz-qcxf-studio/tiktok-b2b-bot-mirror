@@ -12,13 +12,22 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import secrets
 import time
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+
+from tiktok_bot_core.models.entities import TikTokAccount
 from tiktok_bot_core.platforms import Platform, PlatformType, get_platform
 from tiktok_bot_core.storage.database import get_db
 from tiktok_bot_core.storage.sqlite_store import SqliteStore
@@ -29,11 +38,147 @@ logger = logging.getLogger(__name__)
 MAX_ACCOUNTS = 5
 
 
-# 登录成功的 cookie 标识（不同平台字段名不同）
-LOGIN_MARKERS = {
-    PlatformType.TIKTOK: ["sessionid", "ttwid", "msToken"],
-    PlatformType.DOUYIN: ["sessionid", "ttwid", "uid_tt", "LOGIN_STATUS"],
+class AccountAliasConflictError(ValueError):
+    """Canonical account alias is already present or legacy-ambiguous."""
+
+    code = "account_alias_conflict"
+
+    def __init__(self) -> None:
+        super().__init__("account_alias_conflict")
+
+
+class AccountLimitReachedError(ValueError):
+    """No new social account may be inserted at the global capacity limit."""
+
+    code = "account_limit_reached"
+
+    def __init__(self) -> None:
+        super().__init__("account_limit_reached")
+
+
+def normalize_account_alias(value: str) -> str:
+    """Return the one canonical account alias used by every persistence path."""
+
+    if not isinstance(value, str):
+        raise ValueError("account alias must be a string")
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized:
+        raise ValueError("account alias must not be empty")
+    return normalized
+
+
+def begin_immediate_account_write(session) -> None:
+    """Serialize canonical account scans and writes across SQLite processes."""
+
+    bind = session.get_bind()
+    if bind.dialect.name == "sqlite":
+        session.execute(text("BEGIN IMMEDIATE"))
+
+
+def ensure_account_capacity(account_count: int) -> None:
+    """Reject a new account using the single global account limit."""
+
+    if account_count >= MAX_ACCOUNTS:
+        raise AccountLimitReachedError()
+
+
+def _matching_alias_accounts(accounts, alias: str):
+    canonical = normalize_account_alias(alias)
+    matches = []
+    for account in accounts:
+        try:
+            existing = normalize_account_alias(account.username)
+        except ValueError:
+            continue
+        if existing == canonical:
+            matches.append(account)
+    return matches
+
+
+# 只接受服务端登录会话 Cookie。ttwid、msToken、uid_tt 等访客 Cookie
+# 会在扫码前出现，不能作为登录成功依据。
+AUTH_COOKIE_MARKERS: dict[PlatformType, tuple[str, ...]] = {
+    PlatformType.TIKTOK: ("sessionid", "sessionid_ss", "sid_guard"),
+    PlatformType.DOUYIN: ("sessionid", "sessionid_ss", "sid_guard"),
 }
+
+
+@dataclass(frozen=True)
+class AuthPaths:
+    profile_dir: Path = field(repr=False)
+    storage_state: Path = field(repr=False)
+
+
+def build_auth_paths(
+    data_root: Path,
+    platform: str,
+    account_key: str,
+) -> AuthPaths:
+    if platform not in {"tiktok", "douyin"}:
+        raise ValueError("invalid platform")
+
+    try:
+        normalized_key = normalize_account_alias(account_key)
+    except ValueError as exc:
+        raise ValueError("invalid account key") from exc
+
+    readable_slug = re.sub(r"[^\w-]+", "-", normalized_key)
+    readable_slug = readable_slug.strip("-_")[:48].rstrip("-_")
+    if not readable_slug:
+        readable_slug = "account"
+    key_hash = hashlib.sha256(
+        normalized_key.encode("utf-8")
+    ).hexdigest()[:12]
+    safe_key = f"{readable_slug}-{key_hash}"
+
+    return AuthPaths(
+        profile_dir=data_root / "browser_profiles" / platform / safe_key,
+        storage_state=data_root / "auth_states" / platform / f"{safe_key}.json",
+    )
+
+
+def _has_authenticated_cookie(cookies, platform: str) -> bool:
+    platform_type = PlatformType.parse(platform)
+    markers = AUTH_COOKIE_MARKERS[platform_type]
+    if platform_type is not PlatformType.DOUYIN:
+        return any(
+            cookie.get("name") in markers
+            and bool(str(cookie.get("value") or "").strip())
+            for cookie in cookies
+        )
+
+    valid_cookies = [
+        cookie
+        for cookie in cookies
+        if _is_current_douyin_cookie(cookie)
+    ]
+    has_session_cookie = any(
+        cookie.get("name") in markers
+        and bool(str(cookie.get("value") or "").strip())
+        for cookie in valid_cookies
+    )
+    # 抖音 PC web 已登录时并不下发 LOGIN_STATUS，缺失不能判为未登录；
+    # 权威判据是服务端探针，Cookie 只复核域、有效期和会话标记。
+    # 只有平台明确下发 LOGIN_STATUS=0 才是确定的未登录信号。
+    explicitly_logged_out = any(
+        cookie.get("name") == "LOGIN_STATUS"
+        and str(cookie.get("value") or "").strip() == "0"
+        for cookie in valid_cookies
+    )
+    return has_session_cookie and not explicitly_logged_out
+
+
+def _is_current_douyin_cookie(cookie) -> bool:
+    domain = str(cookie.get("domain") or "").strip().lower().lstrip(".")
+    if domain != "douyin.com" and not domain.endswith(".douyin.com"):
+        return False
+    expires = cookie.get("expires")
+    if expires in (None, "", -1, 0):
+        return True
+    try:
+        return float(expires) > time.time()
+    except (TypeError, ValueError):
+        return False
 
 
 class AuthService:
@@ -64,9 +209,13 @@ class AuthService:
                     "id": a.id,
                     "platform": a.platform,
                     "username": a.username,
+                    "display_name": a.display_name or "",
                     "nickname": a.nickname or f"@{a.username}",
+                    "avatar_url": a.avatar_url or "",
                     "status": a.status,
                     "login_method": a.login_method,
+                    "browser_provider": a.browser_provider or "",
+                    "browser_profile_id": a.browser_profile_id or "",
                     "last_login_at": str(a.last_login_at) if a.last_login_at else None,
                     "updated_at": str(a.updated_at) if a.updated_at else "",
                     "follower_count": a.follower_count or 0,
@@ -86,12 +235,69 @@ class AuthService:
                 for a in accounts
             ]
 
-    def _check_account_limit(self):
+    def update_account_display_name(
+        self,
+        aid: int,
+        display_name: str,
+    ) -> dict | None:
+        normalized = display_name.strip()
+        if len(normalized) > 100:
+            raise ValueError("display name must not exceed 100 characters")
+        with self.db.session() as session:
+            account = self.store.get_tiktok_account(session, aid)
+            if account is None:
+                return None
+            account.display_name = normalized
+            account.updated_at = datetime.utcnow()
+            session.flush()
+            return {
+                "id": account.id,
+                "platform": account.platform,
+                "username": account.username,
+                "display_name": account.display_name or "",
+                "nickname": account.nickname or f"@{account.username}",
+                "avatar_url": account.avatar_url or "",
+                "status": account.status,
+                "login_method": account.login_method,
+                "browser_provider": account.browser_provider or "",
+                "browser_profile_id": account.browser_profile_id or "",
+                "last_login_at": (
+                    str(account.last_login_at)
+                    if account.last_login_at
+                    else None
+                ),
+                "updated_at": (
+                    str(account.updated_at) if account.updated_at else ""
+                ),
+                "follower_count": account.follower_count or 0,
+                "followers": account.follower_count or 0,
+                "videos": 0,
+                "likes": 0,
+                "today": {
+                    "comments": 0,
+                    "dms": 0,
+                    "replies": 0,
+                    "currentTask": "等待轮询",
+                },
+                "statusKey": (
+                    "on"
+                    if account.status == "logged_in"
+                    else "off"
+                    if account.status in ("expired", "pending")
+                    else "warn"
+                ),
+            }
+
+    def _check_account_limit(self, session=None):
         """检查账号数量是否已达上限"""
-        with self.db.session() as s:
-            count = len(self.store.get_tiktok_accounts(s))
-        if count >= MAX_ACCOUNTS:
-            raise ValueError(f"账号数量已达上限（{MAX_ACCOUNTS} 个），请先删除不用的账号")
+        if session is None:
+            with self.db.session() as managed_session:
+                count = len(
+                    self.store.get_tiktok_accounts(managed_session)
+                )
+        else:
+            count = len(self.store.get_tiktok_accounts(session))
+        ensure_account_capacity(count)
 
     def add_account(self, platform: str, username: str) -> dict:
         """仅添加账号元信息（还未登录）
@@ -100,23 +306,42 @@ class AuthService:
         """
         # 平台合法性校验
         from tiktok_bot_core.platforms import PlatformType
-        PlatformType.parse(platform)  # 抛 ValueError if invalid
+        normalized_platform = PlatformType.parse(platform).value
+        canonical_alias = normalize_account_alias(username)
 
-        # 账号上限校验
-        self._check_account_limit()
+        try:
+            with self.db.session() as s:
+                begin_immediate_account_write(s)
+                platform_accounts = self.store.get_tiktok_accounts(
+                    s,
+                    platform=normalized_platform,
+                )
+                if _matching_alias_accounts(
+                    platform_accounts,
+                    canonical_alias,
+                ):
+                    raise AccountAliasConflictError()
 
-        with self.db.session() as s:
-            a = self.store.add_tiktok_account(
-                s, username=username, platform=platform,
-                status="pending", login_method="",
-            )
-            # 在 session 内取值，避免 DetachedInstanceError
-            return {
-                "id": a.id,
-                "platform": a.platform,
-                "username": a.username,
-                "status": a.status,
-            }
+                # Limit check belongs to the same transaction and runs after
+                # canonical conflict detection so collisions have one stable
+                # public error even when the account table is full.
+                self._check_account_limit(s)
+                account = TikTokAccount(
+                    username=canonical_alias,
+                    platform=normalized_platform,
+                    status="pending",
+                    login_method="",
+                )
+                s.add(account)
+                s.flush()
+                return {
+                    "id": account.id,
+                    "platform": account.platform,
+                    "username": account.username,
+                    "status": account.status,
+                }
+        except IntegrityError as exc:
+            raise AccountAliasConflictError() from exc
 
     def delete_account(self, aid: int):
         with self.db.session() as s:
@@ -168,9 +393,7 @@ class AuthService:
         cookies_json = json.dumps(cookies, ensure_ascii=False)
 
         # 检测登录状态
-        cookie_names = {c["name"] for c in cookies}
-        markers = LOGIN_MARKERS[PlatformType.parse(platform)]
-        is_logged_in = any(m in cookie_names for m in markers)
+        is_logged_in = _has_authenticated_cookie(cookies, platform)
 
         status = "logged_in" if is_logged_in else "expired"
 
@@ -190,11 +413,12 @@ class AuthService:
     # ============ QR Code 登录 ============
 
     async def start_qrcode_login(self, platform: str, username: str) -> str:
-        """启动二维码登录流程
+        """创建二维码登录会话。
 
         流程：
         1. 创建登录会话（返回 token）
-        2. 后台启动浏览器，截图二维码
+        2. **调用方**负责启动后台登录任务（推荐 FastAPI BackgroundTasks,
+           直接 asyncio.create_task 会被响应返回时取消）
         3. 前端调用 get_qrcode(token) 拿到截图路径
         4. 前端轮询 check_login(token) 等待已登录
         5. 登录成功后才在数据库创建账号记录（避免残留）
@@ -214,16 +438,19 @@ class AuthService:
         # 账号上限校验
         self._check_account_limit()
 
-        # 不再预先创建 pending 账号，等登录成功后再创建
-        # 启动后台登录任务
-        task = asyncio.create_task(self._qrcode_login_task(token, platform, username))
+        # 仅注册 session;真正启动后台任务由调用方通过 BackgroundTasks 注入。
+        # 这样能保证 session 已就绪后再启动 task,避免响应未返回前 task 已开始
+        # 访问 _active_sessions[token] 找不到 key。
         self._active_sessions[token] = {
             "platform": platform,
             "username": username,
-            "task": task,
+            "task": None,                # 由 endpoint 注入 BackgroundTasks 后填回
             "started_at": time.time(),
             "qrcode_path": None,
+            "qrcode_payload": None,
             "logged_in": False,
+            "persisted": False,
+            "status": "launching",
         }
 
         logger.info(f"[{platform}] 启动 QR 登录，会话 token={token[:8]}...")
@@ -238,6 +465,7 @@ class AuthService:
         browser = None
         try:
             p, browser, context, page = await self._launch_browser(platform)
+            self._active_sessions[token]["status"] = "waiting"
             pf = get_platform(platform)
 
             # 步骤1: 确保登录弹窗出现
@@ -246,22 +474,39 @@ class AuthService:
             # 步骤2: 点击切换到「二维码登录」Tab
             await self._switch_to_qr_tab(page, pf, platform)
 
-            # 步骤3: 等待二维码图片出现并截屏（尽快截屏给前端展示）
+            # 步骤3: 等待二维码出现
             await self._wait_for_qrcode(page, pf, platform)
-            logger.info(f"[{platform}] 开始截屏二维码...")
-            qrcode_path = await self._capture_qrcode(page, platform)
-            if qrcode_path:
-                self._active_sessions[token]["qrcode_path"] = str(qrcode_path)
-                logger.info(f"[{platform}] 二维码截图已就绪: {qrcode_path}")
+
+            # 主路径:从 DOM 读源代码(canvas.toDataURL / img src),不截图
+            qr_payload = await self._extract_qrcode_from_dom(page, platform)
+            if qr_payload:
+                self._active_sessions[token]["qrcode_payload"] = qr_payload
+                logger.info(
+                    f"[{platform}] 二维码已就绪 (type={qr_payload['type']}, "
+                    f"size={len(qr_payload['value'])} bytes)"
+                )
             else:
-                # 兜底：直接截全页
-                fallback_path = Path(__file__).parent.parent / "data" / "qrcodes" / f"qr_{int(time.time())}.png"
-                fallback_path.parent.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(fallback_path), full_page=False)
-                self._active_sessions[token]["qrcode_path"] = str(fallback_path)
-                logger.info(f"[{platform}] 兜底全页截图已保存: {fallback_path}")
+                # 兜底:截图保存为文件,API 通过文件路径返回
+                logger.info(f"[{platform}] DOM 读源代码失败,转为截图兜底...")
+                qrcode_path = await self._capture_qrcode(page, platform)
+                if qrcode_path:
+                    self._active_sessions[token]["qrcode_path"] = str(qrcode_path)
+                    logger.info(f"[{platform}] 二维码截图兜底: {qrcode_path}")
+                else:
+                    # 最后兜底:整页截图
+                    fallback_path = (
+                        Path(__file__).parent.parent / "data" / "qrcodes"
+                        / f"qr_{int(time.time())}.png"
+                    )
+                    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+                    await page.screenshot(path=str(fallback_path), full_page=False)
+                    self._active_sessions[token]["qrcode_path"] = str(fallback_path)
+                    logger.info(f"[{platform}] 整页截图兜底: {fallback_path}")
 
             # 步骤4: 轮询等待登录（最长 5 分钟，每 5s 检测一次）
+            # The QR image being ready is not login success. Keep the modal open
+            # until the authenticated session has been verified and stored.
+            self._active_sessions[token]["status"] = "scanning"
             logged_in = await self._poll_login_status(context, page, platform, username, token)
 
             if not logged_in:
@@ -327,19 +572,30 @@ class AuthService:
         ]
 
     async def _ensure_login_dialog(self, page, pf, platform: str):
-        """确保登录弹窗出现，若未自动弹出则手动触发"""
-        dialog_selector = pf.selectors.get("login_dialog", "")
-        if not dialog_selector:
-            return
-        try:
-            await page.wait_for_selector(dialog_selector, timeout=8000)
-            logger.info(f"[{platform}] 登录弹窗已出现")
-        except Exception:
-            logger.warning(f"[{platform}] 登录弹窗未自动弹出，尝试手动触发...")
-            await self._click_login_button(page, pf, platform)
+        """主动点击登录按钮，触发登录弹窗出现。
 
-    async def _click_login_button(self, page, pf, platform: str):
-        """尝试点击登录按钮"""
+        旧版被动等自动弹窗已不适用于 tiktok.com / 抖音 新版首页
+        (默认不再弹登录框),改为"先点击,再等弹窗"。"""
+        logger.info(f"[{platform}] 主动点击登录按钮...")
+        clicked = await self._click_login_button(page, pf, platform)
+        if clicked:
+            return  # 已点击,等待弹窗出现由 _wait_for_qrcode 内部处理
+        # 兜底:可能页面已经显示登录对话框(部分平台 SPA 直接渲染)
+        dialog_selector = pf.selectors.get("login_dialog", "")
+        if dialog_selector:
+            try:
+                await page.wait_for_selector(dialog_selector, timeout=8000)
+                logger.info(f"[{platform}] 登录弹窗已出现（无需点击）")
+            except Exception:
+                logger.warning(f"[{platform}] 主动点击未匹配到任何登录按钮,弹窗也未自动出现")
+
+    async def _click_login_button(self, page, pf, platform: str) -> bool:
+        """尝试点击登录按钮。
+
+        Returns:
+            True  - 至少有一个选择器命中并点击成功
+            False - 全部未命中
+        """
         for sel in self._get_login_btn_selectors(pf):
             if not sel:
                 continue
@@ -348,7 +604,8 @@ class AuthService:
                 await btn.click()
                 logger.info(f"[{platform}] 已点击登录按钮: {sel}")
                 await page.wait_for_timeout(2000)
-                return
+                return True
+        return False
 
     async def _switch_to_qr_tab(self, page, pf, platform: str):
         """点击切换到二维码登录 Tab"""
@@ -391,11 +648,9 @@ class AuthService:
         logger.warning(f"[{platform}] 二维码元素未在 8s 内找到，将使用整页截图")
 
     async def _check_login_cookies(self, context, platform: str) -> bool:
-        """检查 cookies 中的登录标记"""
+        """只认非空服务端会话 Cookie，拒绝 visitor-only Cookie。"""
         cookies = await context.cookies()
-        cookie_names = {c["name"] for c in cookies}
-        markers = LOGIN_MARKERS[PlatformType.parse(platform)]
-        return any(m in cookie_names for m in markers)
+        return _has_authenticated_cookie(cookies, platform)
 
     async def _check_login_local_storage(self, page, platform: str) -> bool:
         """检查 localStorage 中的登录标记（参考 MediaCrawler: HasUserLogin=1）"""
@@ -408,11 +663,11 @@ class AuthService:
             return False
 
     async def _is_logged_in(self, context, page, platform: str) -> bool:
-        """检测是否已登录（cookies + localStorage 双重检查）"""
-        return (
-            await self._check_login_cookies(context, platform)
-            or await self._check_login_local_storage(page, platform)
-        )
+        """认证 Cookie 是唯一成功判据，localStorage 只用于诊断。"""
+        authenticated = await self._check_login_cookies(context, platform)
+        if not authenticated and await self._check_login_local_storage(page, platform):
+            logger.info("[%s] 检测到本地登录状态，继续等待认证 Cookie 写入", platform)
+        return authenticated
 
     async def _save_login_cookies(self, context, platform: str, username: str):
         """登录成功后保存 cookies 到数据库"""
@@ -438,8 +693,18 @@ class AuthService:
             if i % 6 == 0:
                 logger.info(f"[{platform}] 轮询 #{i+1}: 登录状态={logged_in}")
             if logged_in:
-                self._active_sessions[token]["logged_in"] = True
-                await self._save_login_cookies(context, platform, username)
+                session = self._active_sessions[token]
+                session["status"] = "verifying"
+                try:
+                    await self._save_login_cookies(context, platform, username)
+                except Exception as exc:
+                    logger.exception("[%s] 登录已验证但 Cookie 保存失败: %s", platform, exc)
+                    session["status"] = "expired"
+                    session["error"] = "登录已完成，但账号信息保存失败，请重试"
+                    return False
+                session["persisted"] = True
+                session["logged_in"] = True
+                session["status"] = "confirmed"
                 return True
         return False
 
@@ -457,18 +722,77 @@ class AuthService:
                 pass
         logger.info(f"[{platform}] 登录任务结束（{username}）")
 
+    async def _extract_qrcode_from_dom(self, page, platform: str) -> Optional[dict]:
+        """直接从 DOM 读取二维码源数据，避免截图不精准。
+
+        返回 dict(API 直接透传给前端渲染):
+          - {"type": "data_url", "value": "data:image/png;base64,..."}  ← canvas
+          - {"type": "data_url", "value": "data:image/png;base64,..."}  ← img src= data:
+          - {"type": "remote_url", "value": "https://..."}                ← img src= http
+          - {"type": "file", "value": "/abs/path/to.png"}                  ← 截图兜底
+
+        读取顺序:canvas → img (data:) → img (http) → 截图兜底。
+        """
+        pf = get_platform(platform)
+        qr_selector = pf.selectors.get("login_qrcode", "")
+        if not qr_selector:
+            return None
+
+        try:
+            qr_el = await page.wait_for_selector(qr_selector, timeout=8000, state="attached")
+        except Exception:
+            logger.info(f"[{platform}] QR 选择器未匹配,准备截图兜底")
+            return None
+
+        # 1. canvas:toDataURL(最精确,直接拿到 PNG base64)
+        try:
+            data_url = await qr_el.evaluate("""
+                (el) => {
+                    if (!el) return null;
+                    if (el.tagName === 'CANVAS') {
+                        try { return el.toDataURL('image/png'); } catch (e) { return null; }
+                    }
+                    return null;
+                }
+            """)
+            if data_url and isinstance(data_url, str) and data_url.startswith('data:image/'):
+                logger.info(f"[{platform}] QR 从 canvas.toDataURL() 获取 (data_url)")
+                return {"type": "data_url", "value": data_url}
+        except Exception as e:
+            logger.info(f"[{platform}] canvas 读取失败: {e}")
+
+        # 2. img src — 可能是 data: 或远程 URL
+        try:
+            src = await qr_el.evaluate("(el) => el.tagName === 'IMG' ? el.src : null")
+            if src and isinstance(src, str):
+                if src.startswith('data:image/'):
+                    logger.info(f"[{platform}] QR 从 <img src=data:...> 获取 (data_url)")
+                    return {"type": "data_url", "value": src}
+                if src.startswith('http'):
+                    logger.info(f"[{platform}] QR 从 <img src=远程> 获取 (remote_url)")
+                    return {"type": "remote_url", "value": src}
+        except Exception as e:
+            logger.info(f"[{platform}] img src 读取失败: {e}")
+
+        # 3. 截图兜底(写入文件,API 仍按 file 路径返回)
+        logger.info(f"[{platform}] DOM 读源代码失败,截图兜底")
+        return None
+
     async def _capture_qrcode(self, page, platform: str) -> Optional[Path]:
-        """截屏登录二维码区域"""
+        """截屏登录二维码区域 — 作为 _extract_qrcode_from_dom 失败的兜底。
+
+        主路径已经从 DOM 读源代码(canvas / img src),只有当 DOM 读失败
+        时才退回截图。截图保存到 data/qrcodes/qr_<ts>.png。
+        """
         pf = get_platform(platform)
         try:
             qrcode_path = Path(__file__).parent.parent / "data" / "qrcodes" / f"qr_{int(time.time())}.png"
             qrcode_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 尝试找到 QR 元素并截图其区域
             qr_selector = pf.selectors.get("login_qrcode", "")
             if qr_selector:
                 try:
-                    qr_el = await page.wait_for_selector(qr_selector, timeout=5000)
+                    qr_el = await page.wait_for_selector(qr_selector, timeout=3000)
                     if qr_el:
                         await qr_el.screenshot(path=str(qrcode_path))
                         box = await qr_el.bounding_box()
@@ -478,15 +802,14 @@ class AuthService:
                         )
                         return qrcode_path
                 except Exception:
-                    logger.info(f"[{platform}] QR 选择器 '{qr_selector}' 未匹配到元素，使用整页截图兜底")
+                    pass
 
-            # 兜底：整页截图（此时可能页面没有 QR 码，但还是截下来供调试）
             await page.screenshot(path=str(qrcode_path), full_page=False)
             page_url = page.url
             page_title = await page.title()
             logger.info(
-                f"[{platform}] 二维码页面截图已保存: {qrcode_path} "
-                f"(页面URL: {page_url}, 标题: {page_title})"
+                f"[{platform}] 整页截图兜底: {qrcode_path} "
+                f"(URL: {page_url}, title: {page_title})"
             )
             return qrcode_path
         except Exception as e:
@@ -494,15 +817,25 @@ class AuthService:
         return None
 
     def get_qrcode_path(self, token: str) -> Optional[str]:
-        """获取二维码截图路径"""
+        """获取二维码截图路径(DOM 读源代码失败时的截图兜底)"""
         sess = self._active_sessions.get(token)
         return sess.get("qrcode_path") if sess else None
+
+    def get_qrcode_payload(self, token: str) -> Optional[dict]:
+        """获取二维码 payload(主路径返回)
+
+        Returns:
+            dict: {"type": "data_url" | "remote_url" | "file", "value": str}
+            None: 二维码尚未生成
+        """
+        sess = self._active_sessions.get(token)
+        return sess.get("qrcode_payload") if sess else None
 
     def check_login(self, token: str) -> dict:
         """检查登录状态
 
         Returns:
-            {"status": "launching" / "waiting" / "scanning" / "confirmed" / "expired",
+            {"status": "launching" / "waiting" / "scanning" / "verifying" / "confirmed" / "expired",
              "username": str | None,
              "platform": str | None,
              "error": str | None}
@@ -514,7 +847,7 @@ class AuthService:
         if sess.get("error"):
             return {"status": "expired", "error": sess["error"]}
 
-        if sess.get("logged_in"):
+        if sess.get("logged_in") and sess.get("persisted"):
             return {
                 "status": "confirmed",
                 "username": sess.get("username", ""),
@@ -526,6 +859,9 @@ class AuthService:
             return {"status": "expired", "error": "登录超时（5分钟未扫码）"}
 
         elapsed = time.time() - sess["started_at"]
+        phase = sess.get("status")
+        if phase in {"launching", "waiting", "scanning", "verifying"}:
+            return {"status": phase}
         # 有截图路径就立即显示二维码
         if sess.get("qrcode_path"):
             return {"status": "scanning"}
@@ -541,25 +877,107 @@ class AuthService:
     # ============ Cookie 过期检测 ============
 
     async def check_session_valid(self, platform: str, username: str) -> bool:
-        """通过请求受保护页面检查 cookie 是否还有效"""
+        """通过请求受保护页面检查 cookie 是否还有效。
+
+        权威判据是服务端探针 `aweme/v1/web/user/profile/self/`
+        返回 status_code==0 且有非空 uid/sec_uid；只读主页 URL
+        含 "login" 是过时做法，已登录会话也可能停在 SPA 子路由。
+        """
+        if PlatformType.parse(platform) is not PlatformType.DOUYIN:
+            raise ValueError("session_check_unsupported")
+
         from tiktok_bot_core.browser.client import BrowserClient
-        pf = get_platform(platform)
+        from tiktok_bot_core.browser.providers import (
+            DouyinInteractiveLoginProvider,
+            extract_douyin_profile_metadata,
+        )
+
+        # 在自己的 session 内拷贝需要的字段，避免把 ORM 对象带出去触发
+        # DetachedInstanceError。
+        with self.db.session() as s:
+            acc = self.store.get_tiktok_account_by_username(
+                s, username, platform
+            )
+            if not acc or not acc.cookies_json:
+                return False
+            cookies_json = acc.cookies_json
 
         browser = BrowserClient()
         try:
             await browser.init()
-            loaded = await self.load_cookies_to_browser(browser, platform, username)
-            if not loaded:
+            try:
+                cookies = json.loads(cookies_json)
+            except json.JSONDecodeError:
+                logger.error(f"账号 {username} cookies 格式损坏")
+                return False
+            if not isinstance(cookies, list):
+                return False
+            # 必须先导航到目标域再注入；Playwright 在
+            # about:blank 下不接受 secure cookie，且探针 fetch
+            # 不会被识别为同源请求。
+            await browser._page.goto(
+                "https://www.douyin.com/",
+                wait_until="domcontentloaded",
+            )
+            await browser._context.add_cookies(cookies)
+
+            probe = DouyinInteractiveLoginProvider._PROFILE_PROBE_URL
+            result = await browser._page.evaluate(
+                """
+                async (url) => {
+                    try {
+                        const response = await window.fetch(url, {
+                            credentials: "include",
+                        });
+                        if (!response.ok) {
+                            return {ok: false, payload: null};
+                        }
+                        try {
+                            return {ok: true, payload: await response.json()};
+                        } catch (_error) {
+                            return {ok: true, payload: null};
+                        }
+                    } catch (_error) {
+                        return {ok: false, payload: null};
+                    }
+                }
+                """,
+                probe,
+            )
+            if not isinstance(result, Mapping) or not result.get("ok"):
+                return False
+            payload = result.get("payload")
+            if not isinstance(payload, Mapping):
+                return False
+            if payload.get("status_code") != 0:
+                return False
+            user = payload.get("user")
+            if not isinstance(user, Mapping):
+                return False
+            valid = any(
+                isinstance(user.get(field), str)
+                and bool(user.get(field).strip())
+                for field in ("uid", "sec_uid")
+            )
+            if not valid:
                 return False
 
-            # 访问主页，检查是否被重定向到登录页
-            await browser.navigate(pf.home_url)
-            await browser.wait(3000)
-
-            url = browser._page.url if browser._page else ""
-            # 若 URL 包含 login/login-modal 等关键字，说明已掉线
-            if "login" in url.lower():
-                return False
+            profile = extract_douyin_profile_metadata(user)
+            with self.db.session() as session:
+                stored = self.store.get_tiktok_account_by_username(
+                    session,
+                    username,
+                    platform,
+                )
+                if stored is not None:
+                    if profile["nickname"]:
+                        stored.nickname = profile["nickname"]
+                    if profile["avatar_url"]:
+                        stored.avatar_url = profile["avatar_url"]
+                    follower_count = profile["follower_count"]
+                    if follower_count is not None:
+                        stored.follower_count = follower_count
+                    stored.updated_at = datetime.utcnow()
             return True
         except Exception as e:
             logger.warning(f"会话检测失败: {e}")
