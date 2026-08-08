@@ -39,6 +39,12 @@ Web UI、REST API、CLI 和定时 Scheduler 都通过同一个 `PipelineJobServi
 - SQLite `pipeline_jobs / pipeline_job_stages / pipeline_schedules` 队列与历史
 - `/api/pipeline/jobs`、`/api/pipeline/schedules` 和唯一的 `/pipeline` 页面
 - `auto/specified` 账号选择、取消、从失败阶段重试、进程重启恢复和任务内数据隔离
+- `/pipeline` 的四步 AI 获客创建器通过 `POST /api/acquisition/jobs` 原子写入 Job、Campaign
+  与 1—100 个初始关键词，不会先建普通 Job 再补画像
+
+创建器依次配置执行环境、目标画像、探索策略和确认摘要。TikTok 目标国家必填，抖音固定
+中国；员工数、注册资本和上市状态放在阶段 02 按需核验区，不作为阶段 01 强制淘汰条件。
+关键词、70/30 新旧词比例与七项预算在提交前校验，成功后显示服务端锁定快照。
 
 抖音每个运行任务使用独立 Playwright Context，并受
 `douyin_max_concurrency`（1..20）限制；并发设置变化在服务重启后生效。
@@ -105,7 +111,7 @@ KPI 卡片（总用户 / 合格 / 今日新增 / 回复率）+ 30 天趋势图 +
 
 ![Pipeline](docs/screenshots/pipeline.png)
 
-6 阶段卡片（搜集→筛选→策略→触达→汇总→迭代）+ 实时事件流 + 触达队列
+四步 AI 获客任务创建器（执行→画像→策略→确认）+ 统一任务历史 + 六阶段详情/取消/重试
 
 ### Reports — 数据报告
 
@@ -307,6 +313,11 @@ python -m pytest tests/ -v
 2026-08-04 Hermes H1 数据接线验收：AI 获客原子建单/重试与统一业务投影已接入既有
 Pipeline、Users、Lead、Dashboard、Reports 和词云；后端全量 `733 passed`。H2/H3 前端
 工作台尚不在本阶段范围内，租户隔离仍是 P0 上线阻断项。
+
+2026-08-09 Hermes H2 创建器验收：`/pipeline` 已接入四步 AI 获客创建器和原子响应锁定
+摘要；前端 Vitest `74 passed`、Smoke `131 passed`、类型检查与生产构建通过，后端全量
+`733 passed`。桌面与 390px 真实后端页面无横向溢出，最小操作高度 44px。H3 结果看板/
+人工复核工作台与租户隔离仍未交付。
 
 ---
 

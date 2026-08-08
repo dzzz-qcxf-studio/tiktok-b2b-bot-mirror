@@ -1,7 +1,7 @@
 # 06 — CLI / API / UI 三层接口
 
 > 关联: [索引](00-索引.md) | [Pipeline](05-Pipeline.md) | [Skills](08-Skills.md)
-> 最后更新: 2026-08-08（Hermes H1 数据接线）
+> 最后更新: 2026-08-09（Hermes H2 获客创建器）
 
 ## 设计原则
 
@@ -156,6 +156,18 @@ Credentials 等凭据类键及常见组合变体；`authHeader/authValue`、`aut
 `businessMode=ai_acquisition` 与 `acquisitionSchemaVersion=1.0` 只用于展示和诊断，运行时仍以
 Campaign 是否存在判断 AI 获客任务。
 
+### Hermes H2 Web 创建契约
+
+`AcquisitionJobCreator.vue` 是 `/pipeline` 唯一的手动获客创建入口。前端领域层先统一验证
+执行范围、目标画像、条件分层、关键词、七项搜索预算和关键词比例，再构造
+`CreateAcquisitionJobPayload`。Real/Auto 模式下原子写入失败会直接显示真实错误，不会退化为
+Mock 成功，也不会先调用 `/api/pipeline/jobs` 留下半成品任务。
+
+前端写入的 `configSnapshot` 仅含 `creatorSchemaVersion/creatorSource/
+targetProfileConfigured` 三项无凭据元数据。提交成功后子组件发出完整服务端响应，父页面把
+历史 offset 重置为 0、刷新列表并选中新 Job；账号元数据通过事件合并，继续供详情账号标签
+使用。H2 没有新增第二套历史、轮询、取消或重试状态。
+
 ### 全局业务投影 API
 
 以下既有接口已统一通过 `BusinessReadModel` 读取 AI 获客与 legacy 数据：
@@ -204,7 +216,7 @@ UTC 00:00 为边界；日报趋势仍读取 `DailyReport` 历史快照。
 | `/users` | Users | 用户列表（筛选/搜索/分页/CSV 导入导出/手动添加） |
 | `/users/:username` | UserDetail | 用户画像 + 评分 + 策略 + 时间线 + 视频 |
 | `/leads` | Leads | Lead 发现（关键词搜索 + 一键入库） |
-| `/pipeline` | Pipeline | 双平台/账号选择 + 创建 Job + 统一历史 + 阶段详情/取消/重试 |
+| `/pipeline` | Pipeline | 四步 AI 获客创建器 + 原子 Job/Campaign/Keywords + 统一历史/详情/取消/重试 |
 | `/reports` | Reports | 日报/趋势/漏斗/地区/情感 + 自定义报告 |
 | `/config-accounts` | ConfigAccounts | 社交账号管理 + 人工浏览器登录 + 本地备注名 + 真实平台头像 |
 | `/config-llm` | ConfigLlm | Provider 弹窗 CRUD/密钥更新/服务端连接测试/五类 Route/真实用量 |
