@@ -168,6 +168,7 @@
             <strong v-else>{{ $t('pipeline.preflightBlocked') }}</strong>
             <small v-if="capabilitiesError">{{ capabilitiesError }}</small>
             <small v-else-if="capability?.message">{{ capability.message }}</small>
+            <code v-if="capability?.code">{{ capability.code }}</code>
           </div>
           <button
             v-if="capabilitiesError"
@@ -1050,7 +1051,8 @@ select:disabled {
 }
 
 .preflight strong,
-.preflight small {
+.preflight small,
+.preflight code {
   display: block;
 }
 
@@ -1062,6 +1064,13 @@ select:disabled {
 .preflight small {
   margin-top: 2px;
   color: var(--muted);
+}
+
+.preflight code {
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
 }
 
 .preflight.ready {

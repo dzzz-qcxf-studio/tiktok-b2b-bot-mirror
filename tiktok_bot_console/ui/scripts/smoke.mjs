@@ -448,28 +448,35 @@ if (
 group('unified pipeline page contract')
 
 const pipelineViewSrc = readFileSync(join(root, 'src', 'views', 'Pipeline.vue'), 'utf8')
+const appShellSrc = readFileSync(join(root, 'src', 'App.vue'), 'utf8')
+const acquisitionCreatorSrc = readFileSync(
+  join(root, 'src', 'components', 'AcquisitionJobCreator.vue'),
+  'utf8',
+)
 const pipelineViewChecks = [
-  ['single page platform selector', pipelineViewSrc.includes('data-testid="pipeline-platform-tiktok"') && pipelineViewSrc.includes('data-testid="pipeline-platform-douyin"')],
-  ['account mode and specified account selector', pipelineViewSrc.includes('data-testid="pipeline-account-auto"') && pipelineViewSrc.includes('data-testid="pipeline-account-specified"') && pipelineViewSrc.includes('data-testid="pipeline-account-select"')],
+  ['single page embeds one acquisition creator', pipelineViewSrc.includes('<AcquisitionJobCreator') && pipelineViewSrc.includes('@created="handleAcquisitionCreated"') && !pipelineViewSrc.includes('data-testid="pipeline-platform-douyin"')],
+  ['single page platform selector', acquisitionCreatorSrc.includes('data-testid="acquisition-platform-tiktok"') && acquisitionCreatorSrc.includes('data-testid="acquisition-platform-douyin"')],
+  ['account mode and specified account selector', acquisitionCreatorSrc.includes('data-testid="acquisition-account-auto"') && acquisitionCreatorSrc.includes('data-testid="acquisition-account-specified"') && acquisitionCreatorSrc.includes('data-testid="acquisition-account-select"')],
   ['all six selectable stages', pipelineViewSrc.includes("'collect', 'filter', 'strategy', 'outreach', 'report', 'iterate'")],
-  ['creates durable job with explicit selection', pipelineViewSrc.includes('createPipelineJob') && pipelineViewSrc.includes('platform: selectedPlatform.value') && pipelineViewSrc.includes('accountMode: accountMode.value') && pipelineViewSrc.includes('accountId: selectedAccountId.value') && !pipelineViewSrc.includes('runPipeline')],
-  ['capability preflight renders stable code', pipelineViewSrc.includes('getPipelineCapabilities') && pipelineViewSrc.includes('capability.code') && pipelineViewSrc.includes('capability.message')],
-  ['blocked capability prioritizes provider message', /v-if="!capability\.available && capability\.message"[\s\S]{0,260}v-else-if="selectedPlatform === 'douyin'"/.test(pipelineViewSrc)],
+  ['creates one atomic acquisition job with explicit selection', acquisitionCreatorSrc.includes('createAcquisitionJob(payload)') && acquisitionCreatorSrc.includes('buildAcquisitionJobPayload(draft.value)') && !pipelineViewSrc.includes('createPipelineJob')],
+  ['capability preflight renders stable code', acquisitionCreatorSrc.includes('getPipelineCapabilities') && acquisitionCreatorSrc.includes('capability?.code') && acquisitionCreatorSrc.includes('capability?.message')],
+  ['blocked capability prioritizes provider message', acquisitionCreatorSrc.includes('v-else-if="capability?.message"') && acquisitionCreatorSrc.includes('{{ capability.message }}')],
   ['job history pagination and refresh', pipelineViewSrc.includes('listPipelineJobs') && pipelineViewSrc.includes('historyOffset') && pipelineViewSrc.includes('refreshJobs')],
   ['job detail supports cancel and retry', pipelineViewSrc.includes('cancelPipelineJob') && pipelineViewSrc.includes('retryPipelineJob') && pipelineViewSrc.includes('canCancel') && pipelineViewSrc.includes('canRetry')],
   ['all durable job states are recognizable', ['queued', 'running', 'cancelling', 'succeeded', 'partial_failed', 'failed', 'interrupted', 'cancelled'].every(status => pipelineViewSrc.includes(`'${status}'`))],
   ['loading empty and error states', pipelineViewSrc.includes('historyLoading') && pipelineViewSrc.includes('historyError') && pipelineViewSrc.includes('pipeline.historyEmpty')],
   ['list refresh never replaces full selected detail', pipelineViewSrc.includes('refreshSelectedJobDetail') && !pipelineViewSrc.includes('selectedJob.value = selectedInPage')],
-  ['async reads commit latest matching request only', ['accountsRequestToken', 'historyRequestToken', 'detailRequestToken', 'platformSnapshot', 'offsetSnapshot', 'jobIdSnapshot'].every(token => pipelineViewSrc.includes(token))],
+  ['async reads commit latest matching request only', ['historyRequestToken', 'detailRequestToken', 'offsetSnapshot', 'jobIdSnapshot'].every(token => pipelineViewSrc.includes(token)) && acquisitionCreatorSrc.includes('accountsRequestToken') && acquisitionCreatorSrc.includes('requestToken !== accountsRequestToken')],
   ['polling is non-reentrant and refreshes selected detail', pipelineViewSrc.includes('pollInFlight') && pipelineViewSrc.includes('if (pollInFlight) return') && /pollActiveJob[\s\S]{0,500}refreshSelectedJobDetail/.test(pipelineViewSrc)],
   ['job actions preserve a newer selection', pipelineViewSrc.includes('const targetId = selectedJob.value.id') && pipelineViewSrc.includes('selectedJobId.value === targetId') && pipelineViewSrc.includes('actionRequestToken')],
-  ['account validity gates job creation', pipelineViewSrc.includes('selectedAccountIsValid') && pipelineViewSrc.includes('loggedInAccounts.value.length > 0') && pipelineViewSrc.includes('selectedAccountId.value = null')],
-  ['segmented controls expose keyboard radio semantics', pipelineViewSrc.includes('role="radio"') && pipelineViewSrc.includes(':aria-checked=') && pipelineViewSrc.includes('@keydown.left') && pipelineViewSrc.includes('@keydown.right')],
+  ['account validity gates job creation', acquisitionCreatorSrc.includes('loggedInAccounts.value.length === 0') && acquisitionCreatorSrc.includes('draft.value.accountId = null') && acquisitionCreatorSrc.includes("code: 'account_required'")],
+  ['segmented controls expose keyboard radio semantics', acquisitionCreatorSrc.includes('role="radio"') && acquisitionCreatorSrc.includes(':aria-checked=') && acquisitionCreatorSrc.includes('@keydown.left') && acquisitionCreatorSrc.includes('@keydown.right')],
+  ['mobile shell releases content width and keeps navigation', appShellSrc.includes('@media (max-width: 700px)') && appShellSrc.includes('inset: auto 0 0;') && appShellSrc.includes('overflow-x: auto;') && appShellSrc.includes('padding-bottom: calc(64px + env(safe-area-inset-bottom));')],
 ]
 
 for (const [label, condition] of pipelineViewChecks) {
   if (condition) ok(label)
-  else fail(label, 'Pipeline.vue does not satisfy the unified task console contract')
+  else fail(label, 'Pipeline.vue and AcquisitionJobCreator.vue do not satisfy the unified task console contract')
 }
 
 // ---------- 3c. Unified schedule and provider settings contract ----------

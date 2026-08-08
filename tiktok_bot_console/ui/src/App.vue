@@ -279,4 +279,109 @@ const crumbCurrent = computed(() => {
 .api-mode-toggle button { padding: 3px 10px; border: none; background: transparent; border-radius: 6px; font-size: 11.5px; color: var(--fg-2); cursor: pointer; font-weight: 500; }
 .api-mode-toggle button:hover:not(.active) { color: var(--fg); }
 .api-mode-toggle button.active { background: var(--surface); color: var(--fg); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+
+@media (max-width: 700px) {
+  .shell {
+    display: block;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom));
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: auto 0 0;
+    z-index: 60;
+    width: 100%;
+    height: calc(64px + env(safe-area-inset-bottom));
+    flex-direction: row;
+    align-items: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-top: 1px solid var(--sb-border);
+    border-right: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    scrollbar-width: none;
+  }
+
+  .sidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sb-brand,
+  .sb-section,
+  .sb-foot {
+    display: none;
+  }
+
+  .sb-nav {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    padding: 5px 4px;
+    overflow: visible;
+  }
+
+  .sb-link {
+    min-width: 62px;
+    min-height: 54px;
+    margin: 0;
+    padding: 5px 6px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    text-align: center;
+  }
+
+  .sb-link.active::before {
+    inset: -5px 12px auto;
+    width: auto;
+    height: 3px;
+    transform: none;
+  }
+
+  .main {
+    width: 100%;
+  }
+
+  .topbar {
+    height: 48px;
+    padding: 0 12px;
+  }
+
+  .topbar-left {
+    min-width: 0;
+  }
+
+  .crumb {
+    min-width: 0;
+    font-size: 11px;
+  }
+
+  .crumb > span:first-child,
+  .crumb .sep,
+  .search,
+  .topbar-right > .icon-btn,
+  .topbar-right > .avatar {
+    display: none;
+  }
+
+  .crumb b {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mock-banner {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 7px 12px;
+    font-size: 11px;
+  }
+
+  .api-mode-toggle {
+    width: 100%;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+}
 </style>

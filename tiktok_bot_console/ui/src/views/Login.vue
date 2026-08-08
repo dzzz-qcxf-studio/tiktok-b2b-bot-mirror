@@ -8,7 +8,11 @@
 
       <div class="pitch">
         <div class="eyebrow">{{ $t('login.eyebrow') }}</div>
-        <h1 v-html="$t('login.headline')"></h1>
+        <h1>
+          {{ $t('login.headline') }}<br>
+          <em>{{ $t('login.headlineEmphasis') }}</em><br>
+          {{ $t('login.headlineSuffix') }}
+        </h1>
         <p>{{ $t('login.pitch') }}</p>
 
         <div class="stage-row">
