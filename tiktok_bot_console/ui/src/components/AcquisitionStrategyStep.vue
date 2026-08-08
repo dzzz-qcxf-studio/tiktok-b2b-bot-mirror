@@ -638,6 +638,19 @@ select:focus {
   .mix-grid {
     grid-template-columns: 1fr;
   }
+
+  input,
+  select,
+  .btn,
+  .tag button,
+  .keyword-list button {
+    min-height: 44px;
+  }
+
+  .tag button,
+  .keyword-list button {
+    width: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

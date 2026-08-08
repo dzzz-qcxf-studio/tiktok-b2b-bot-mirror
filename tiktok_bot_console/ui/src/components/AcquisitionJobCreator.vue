@@ -72,23 +72,31 @@
             <legend>{{ $t('pipeline.platform') }}</legend>
             <div class="segmented" role="radiogroup" :aria-label="$t('pipeline.platform')">
               <button
-                data-testid="acquisition-platform-tiktok"
-                type="button"
-                role="radio"
+              data-testid="acquisition-platform-tiktok"
+              ref="tiktokPlatformRadio"
+              type="button"
+              role="radio"
                 :class="{ active: draft.platform === 'tiktok' }"
-                :aria-checked="draft.platform === 'tiktok'"
-                @click="selectPlatform('tiktok')"
+              :aria-checked="draft.platform === 'tiktok'"
+              :tabindex="draft.platform === 'tiktok' ? 0 : -1"
+              @click="selectPlatform('tiktok')"
+              @keydown.left.prevent="selectPlatform('douyin', true)"
+              @keydown.right.prevent="selectPlatform('douyin', true)"
               >
                 <span class="platform-code">TT</span>
                 TikTok
               </button>
               <button
-                data-testid="acquisition-platform-douyin"
+              data-testid="acquisition-platform-douyin"
+              ref="douyinPlatformRadio"
                 type="button"
                 role="radio"
                 :class="{ active: draft.platform === 'douyin' }"
-                :aria-checked="draft.platform === 'douyin'"
-                @click="selectPlatform('douyin')"
+              :aria-checked="draft.platform === 'douyin'"
+              :tabindex="draft.platform === 'douyin' ? 0 : -1"
+              @click="selectPlatform('douyin')"
+              @keydown.left.prevent="selectPlatform('tiktok', true)"
+              @keydown.right.prevent="selectPlatform('tiktok', true)"
               >
                 <span class="platform-code">DY</span>
                 {{ $t('pipeline.douyin') }}
@@ -100,22 +108,30 @@
             <legend>{{ $t('pipeline.accountStrategy') }}</legend>
             <div class="segmented" role="radiogroup" :aria-label="$t('pipeline.accountStrategy')">
               <button
-                data-testid="acquisition-account-auto"
+              data-testid="acquisition-account-auto"
+              ref="autoAccountRadio"
                 type="button"
                 role="radio"
                 :class="{ active: draft.accountMode === 'auto' }"
-                :aria-checked="draft.accountMode === 'auto'"
-                @click="selectAccountMode('auto')"
+              :aria-checked="draft.accountMode === 'auto'"
+              :tabindex="draft.accountMode === 'auto' ? 0 : -1"
+              @click="selectAccountMode('auto')"
+              @keydown.left.prevent="selectAccountMode('specified', true)"
+              @keydown.right.prevent="selectAccountMode('specified', true)"
               >
                 {{ $t('pipeline.accountAuto') }}
               </button>
               <button
-                data-testid="acquisition-account-specified"
+              data-testid="acquisition-account-specified"
+              ref="specifiedAccountRadio"
                 type="button"
                 role="radio"
                 :class="{ active: draft.accountMode === 'specified' }"
-                :aria-checked="draft.accountMode === 'specified'"
-                @click="selectAccountMode('specified')"
+              :aria-checked="draft.accountMode === 'specified'"
+              :tabindex="draft.accountMode === 'specified' ? 0 : -1"
+              @click="selectAccountMode('specified')"
+              @keydown.left.prevent="selectAccountMode('auto', true)"
+              @keydown.right.prevent="selectAccountMode('auto', true)"
               >
                 {{ $t('pipeline.accountSpecified') }}
               </button>
@@ -372,7 +388,12 @@
           :disabled="submitting || !confirmationPayload"
           @click="submitJob"
         >
-          {{ submitting ? $t('pipeline.acquisition.submitting') : $t('pipeline.acquisition.submit') }}
+          <span
+            v-if="submitting"
+            data-testid="acquisition-submit-status"
+            role="status"
+          >{{ $t('pipeline.acquisition.submitting') }}</span>
+          <span v-else>{{ $t('pipeline.acquisition.submit') }}</span>
         </button>
       </footer>
 
@@ -389,7 +410,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { createAcquisitionJob, getAccounts, getPipelineCapabilities } from '../api'
@@ -482,6 +503,10 @@ const capabilitiesError = ref('')
 const accounts = ref<SocialAccount[]>([])
 const accountsLoading = ref(false)
 const accountsError = ref('')
+const tiktokPlatformRadio = ref<HTMLButtonElement | null>(null)
+const douyinPlatformRadio = ref<HTMLButtonElement | null>(null)
+const autoAccountRadio = ref<HTMLButtonElement | null>(null)
+const specifiedAccountRadio = ref<HTMLButtonElement | null>(null)
 const submitting = ref(false)
 const submitError = ref('')
 const lockedSummary = ref<CreateAcquisitionJobResponse | null>(null)
@@ -510,12 +535,26 @@ const confirmationPayload = computed(() => {
 function extractError(error: unknown, fallback: string) {
   const candidate = error as {
     message?: string
-    response?: { data?: { detail?: string | { code?: string; message?: string } } }
+    response?: { data?: { detail?: string | Array<{
+      loc?: Array<string | number>
+      msg?: string
+      type?: string
+    }> | { code?: string; message?: string } } }
   }
   const detail = candidate.response?.data?.detail
   if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      const location = item.loc
+        ?.filter(segment => segment !== 'body')
+        .map(String)
+        .join('.')
+      return [location, item.msg || item.type].filter(Boolean).join(' · ')
+    }).filter(Boolean)
+    return messages.join('; ') || fallback
+  }
   if (detail && typeof detail === 'object') {
-    return [detail.code, detail.message].filter(Boolean).join(' · ')
+    return [detail.code, detail.message].filter(Boolean).join(' · ') || fallback
   }
   return candidate.message || fallback
 }
@@ -552,18 +591,30 @@ async function loadAccounts(platform: PipelinePlatform) {
   }
 }
 
-function selectPlatform(platform: PipelinePlatform) {
+function selectPlatform(platform: PipelinePlatform, focus = false) {
   if (platform === draft.value.platform) return
   draft.value = applyPlatformDefaults(draft.value, platform)
   visibleErrors.value = []
   Object.keys(tagErrors).forEach(key => delete tagErrors[key as TargetListKey])
   void loadAccounts(platform)
+  if (focus) {
+    void nextTick(() => {
+      const target = platform === 'tiktok' ? tiktokPlatformRadio.value : douyinPlatformRadio.value
+      target?.focus()
+    })
+  }
 }
 
-function selectAccountMode(mode: AccountMode) {
+function selectAccountMode(mode: AccountMode, focus = false) {
   draft.value.accountMode = mode
   if (mode === 'auto') draft.value.accountId = null
   visibleErrors.value = []
+  if (focus) {
+    void nextTick(() => {
+      const target = mode === 'auto' ? autoAccountRadio.value : specifiedAccountRadio.value
+      target?.focus()
+    })
+  }
 }
 
 function normalizeStages() {
@@ -1328,6 +1379,17 @@ select:disabled {
 
   .step-button {
     min-height: 48px;
+  }
+
+  input,
+  select,
+  .btn,
+  .tag button {
+    min-height: 44px;
+  }
+
+  .tag button {
+    width: 44px;
   }
 
   .stage-grid {

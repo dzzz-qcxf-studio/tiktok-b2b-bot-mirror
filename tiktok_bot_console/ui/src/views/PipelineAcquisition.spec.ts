@@ -420,6 +420,81 @@ describe('AcquisitionJobCreator execution and target profile steps', () => {
     await flushPromises()
     expect(api.createAcquisitionJob).toHaveBeenCalledTimes(2)
   })
+
+  it('supports arrow-key platform and account-mode selection', async () => {
+    const wrapper = mountCreator()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="acquisition-platform-tiktok"]').trigger('click')
+    await wrapper.get('[data-testid="acquisition-platform-tiktok"]').trigger('keydown.right')
+    expect(wrapper.get('[data-testid="acquisition-platform-douyin"]').attributes('aria-checked')).toBe('true')
+
+    await wrapper.get('[data-testid="acquisition-account-auto"]').trigger('keydown.right')
+    expect(wrapper.get('[data-testid="acquisition-account-specified"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it('associates every strategy input with an accessible label', async () => {
+    const wrapper = mountCreator()
+    await reachStrategy(wrapper)
+
+    for (const control of wrapper.findAll('input, select')) {
+      const element = control.element as HTMLInputElement | HTMLSelectElement
+      if (element.type === 'checkbox') continue
+      const nestedLabel = element.closest('label')
+      const explicitLabel = element.id
+        ? wrapper.find(`label[for="${element.id}"]`).exists()
+        : false
+      expect(Boolean(nestedLabel) || explicitLabel, element.outerHTML).toBe(true)
+    }
+  })
+
+  it('locks all navigation during submission and gives keyword removal a named target', async () => {
+    let resolveRequest: ((value: ReturnType<typeof createJobResponse>) => void) | undefined
+    api.createAcquisitionJob.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRequest = resolve
+    }))
+    const wrapper = mountCreator()
+    await reachConfirm(wrapper)
+
+    await wrapper.get('[data-testid="acquisition-previous"]').trigger('click')
+    const remove = wrapper.get('[data-testid="acquisition-keyword-remove-0"]')
+    expect(remove.attributes('aria-label')).toContain('越南 电力 项目')
+    await wrapper.get('[data-testid="acquisition-next"]').trigger('click')
+
+    await wrapper.get('[data-testid="acquisition-submit"]').trigger('click')
+    expect(wrapper.findAll('[data-testid^="acquisition-step-"]').every(step => step.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.get('[data-testid="acquisition-previous"]').attributes('disabled')).not.toBeUndefined()
+    expect(wrapper.get('[data-testid="acquisition-submit"]').attributes('disabled')).not.toBeUndefined()
+    expect(wrapper.get('[data-testid="acquisition-submit-status"]').attributes('role')).toBe('status')
+
+    const payload = api.createAcquisitionJob.mock.calls[0]![0]
+    resolveRequest?.(createJobResponse(payload))
+    await flushPromises()
+  })
+
+  it('renders FastAPI array validation details without object coercion', async () => {
+    api.createAcquisitionJob.mockRejectedValueOnce({
+      response: {
+        data: {
+          detail: [{
+            loc: ['body', 'campaign', 'countries'],
+            msg: 'Country is required',
+            type: 'value_error',
+          }],
+        },
+      },
+    })
+    const wrapper = mountCreator()
+    await reachConfirm(wrapper)
+
+    await wrapper.get('[data-testid="acquisition-submit"]').trigger('click')
+    await flushPromises()
+
+    const error = wrapper.get('[data-testid="acquisition-submit-error"]').text()
+    expect(error).toContain('campaign.countries')
+    expect(error).toContain('Country is required')
+    expect(error).not.toContain('[object Object]')
+  })
 })
 
 describe('Pipeline acquisition creator integration', () => {
