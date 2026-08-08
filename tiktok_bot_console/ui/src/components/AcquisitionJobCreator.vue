@@ -9,6 +9,37 @@
       <span class="system-mark">{{ $t('pipeline.singleSystem') }}</span>
     </header>
 
+    <aside
+      v-if="lockedSummary"
+      data-testid="acquisition-locked-summary"
+      class="locked-summary"
+      role="status"
+    >
+      <div>
+        <span class="locked-mark">{{ $t('pipeline.acquisition.locked.badge') }}</span>
+        <strong>{{ $t('pipeline.acquisition.locked.title') }}</strong>
+        <small>{{ $t('pipeline.acquisition.locked.hint') }}</small>
+      </div>
+      <dl>
+        <div>
+          <dt>Job ID</dt>
+          <dd>{{ lockedSummary.job.id }}</dd>
+        </div>
+        <div>
+          <dt>{{ $t('common.status') }}</dt>
+          <dd>{{ lockedSummary.job.status }}</dd>
+        </div>
+        <div>
+          <dt>{{ $t('pipeline.acquisition.fields.industries') }}</dt>
+          <dd>{{ formatList(lockedSummary.campaign.industries) }}</dd>
+        </div>
+        <div>
+          <dt>{{ $t('pipeline.acquisition.keywords.title') }}</dt>
+          <dd>{{ formatList(lockedSummary.keywords.map(keyword => keyword.text)) }}</dd>
+        </div>
+      </dl>
+    </aside>
+
     <nav class="step-nav" :aria-label="$t('pipeline.acquisition.stepNavigation')">
       <button
         v-for="(step, index) in STEP_KEYS"
@@ -18,7 +49,7 @@
         :class="{ active: activeStep === index, completed: activeStep > index }"
         type="button"
         :aria-current="activeStep === index ? 'step' : undefined"
-        :disabled="index > activeStep"
+        :disabled="submitting || index > activeStep"
         @click="activeStep = index"
       >
         <span>{{ String(index + 1).padStart(2, '0') }}</span>
@@ -212,7 +243,7 @@
                 <button
                   type="button"
                   :data-testid="`acquisition-${field.testId}-remove-${index}`"
-                  :aria-label="$t('pipeline.acquisition.removeTag', { item })"
+                  :aria-label="$t('pipeline.acquisition.removeTag', { value: item })"
                   @click="removeTag(field.key, index)"
                 >
                   ×
@@ -232,15 +263,77 @@
         </div>
       </template>
 
+      <template v-else-if="activeStep === 2">
+        <AcquisitionStrategyStep
+          v-model="draft"
+          :errors="visibleErrors"
+          @changed="clearVisibleErrors"
+        />
+      </template>
+
       <template v-else>
-        <div class="placeholder-panel" role="status">
-          <span class="section-kicker">{{ String(activeStep + 1).padStart(2, '0') }}</span>
-          <h4>{{ $t(`pipeline.acquisition.steps.${STEP_KEYS[activeStep]}`) }}</h4>
-          <p>{{ $t('pipeline.acquisition.nextStagePlaceholder') }}</p>
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">04</span>
+            <h4>{{ $t('pipeline.acquisition.confirmTitle') }}</h4>
+          </div>
+          <p>{{ $t('pipeline.acquisition.confirmHint') }}</p>
+        </div>
+
+        <div
+          v-if="confirmationPayload"
+          data-testid="acquisition-confirm-summary"
+          class="confirm-summary"
+        >
+          <section>
+            <h5>{{ $t('pipeline.acquisition.confirm.execution') }}</h5>
+            <dl>
+              <div><dt>{{ $t('pipeline.platform') }}</dt><dd>{{ confirmationPayload.platform }}</dd></div>
+              <div><dt>{{ $t('pipeline.accountStrategy') }}</dt><dd>{{ confirmationPayload.accountMode }}</dd></div>
+              <div><dt>{{ $t('pipeline.stages') }}</dt><dd>{{ formatList(confirmationPayload.stages) }}</dd></div>
+            </dl>
+          </section>
+          <section>
+            <h5>{{ $t('pipeline.acquisition.confirm.target') }}</h5>
+            <dl>
+              <div><dt>{{ $t('pipeline.acquisition.fields.countries') }}</dt><dd>{{ formatList(confirmationPayload.campaign.countries) }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.fields.industries') }}</dt><dd>{{ formatList(confirmationPayload.campaign.industries) }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.fields.customerRoles') }}</dt><dd>{{ formatList(confirmationPayload.campaign.customerRoles) }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.fields.products') }}</dt><dd>{{ formatList(confirmationPayload.campaign.products) }}</dd></div>
+            </dl>
+          </section>
+          <section>
+            <h5>{{ $t('pipeline.acquisition.confirm.verification') }}</h5>
+            <dl>
+              <div><dt>{{ $t('pipeline.acquisition.preferences.employeeCount') }}</dt><dd>{{ confirmationPayload.campaign.preferenceConditions?.employeeCount || '—' }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.preferences.registeredCapital') }}</dt><dd>{{ confirmationPayload.campaign.preferenceConditions?.registeredCapital || '—' }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.preferences.listingStatus') }}</dt><dd>{{ confirmationPayload.campaign.preferenceConditions?.listingStatus || '—' }}</dd></div>
+              <div><dt>{{ $t('pipeline.acquisition.hardConditions.requiredKeywords') }}</dt><dd>{{ formatList(confirmationPayload.campaign.hardConditions?.requiredKeywords) }}</dd></div>
+            </dl>
+          </section>
+          <section>
+            <h5>{{ $t('pipeline.acquisition.confirm.budget') }}</h5>
+            <dl class="budget-summary">
+              <div v-for="key in BUDGET_KEYS" :key="key">
+                <dt>{{ $t(`pipeline.acquisition.budget.${key}`) }}</dt>
+                <dd>{{ confirmationPayload.campaign.searchBudget?.[key] }}</dd>
+              </div>
+              <div>
+                <dt>{{ $t('pipeline.acquisition.keywordMix.title') }}</dt>
+                <dd>{{ confirmationPayload.campaign.keywordMix?.effectivePercent }}% / {{ confirmationPayload.campaign.keywordMix?.newPercent }}%</dd>
+              </div>
+            </dl>
+          </section>
+          <section class="confirm-keywords">
+            <h5>{{ $t('pipeline.acquisition.keywords.title') }}</h5>
+            <span v-for="keyword in confirmationPayload.keywords" :key="keyword.text + keyword.language" class="tag">
+              {{ keyword.text }} · {{ keyword.language || '—' }} · {{ keyword.keywordType }}
+            </span>
+          </section>
         </div>
       </template>
 
-      <div v-if="visibleErrors.length" class="form-error" role="alert">
+      <div v-if="visibleErrors.length && activeStep !== 2" class="form-error" role="alert">
         <strong>{{ $t('pipeline.acquisition.fixErrors') }}</strong>
         <ul>
           <li v-for="error in visibleErrors" :key="error.field + error.code">
@@ -252,23 +345,45 @@
       <footer class="step-footer">
         <button
           v-if="activeStep > 0"
+          data-testid="acquisition-previous"
           class="btn"
           type="button"
+          :disabled="submitting"
           @click="goBack"
         >
           {{ $t('pipeline.acquisition.previous') }}
         </button>
         <span v-else></span>
         <button
-          v-if="activeStep < 2"
+          v-if="activeStep < 3"
           data-testid="acquisition-next"
           class="btn brand"
           type="button"
+          :disabled="submitting"
           @click="goNext"
         >
           {{ $t('pipeline.acquisition.next') }}
         </button>
+        <button
+          v-else
+          data-testid="acquisition-submit"
+          class="btn brand"
+          type="button"
+          :disabled="submitting || !confirmationPayload"
+          @click="submitJob"
+        >
+          {{ submitting ? $t('pipeline.acquisition.submitting') : $t('pipeline.acquisition.submit') }}
+        </button>
       </footer>
+
+      <p
+        v-if="submitError"
+        data-testid="acquisition-submit-error"
+        class="submit-error"
+        role="alert"
+      >
+        {{ submitError }}
+      </p>
     </div>
   </section>
 </template>
@@ -277,23 +392,29 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-import { getAccounts, getPipelineCapabilities } from '../api'
+import { createAcquisitionJob, getAccounts, getPipelineCapabilities } from '../api'
 import type {
   AccountMode,
+  AcquisitionSearchBudget,
+  CreateAcquisitionJobResponse,
   PipelineCapabilities,
   PipelinePlatform,
   PipelineStageName,
 } from '../types/pipeline'
 import {
   PIPELINE_STAGE_ORDER,
+  AcquisitionDraftValidationError,
   addUniqueListItem,
   applyPlatformDefaults,
+  buildAcquisitionJobPayload,
   createAcquisitionDraft,
   normalizeSelectedStages,
   validateExecutionScope,
+  validateExplorationStrategy,
   validateTargetProfile,
   type AcquisitionValidationError,
 } from './acquisitionCreator'
+import AcquisitionStrategyStep from './AcquisitionStrategyStep.vue'
 
 interface SocialAccount {
   id: number
@@ -320,6 +441,7 @@ interface TargetField {
 
 const emit = defineEmits<{
   accountsLoaded: [accounts: SocialAccount[]]
+  created: [response: CreateAcquisitionJobResponse]
 }>()
 
 const { t } = useI18n()
@@ -331,6 +453,15 @@ const TARGET_FIELDS: TargetField[] = [
   { key: 'products', testId: 'products', required: false },
   { key: 'customerRoles', testId: 'customer-roles', required: true },
   { key: 'excludedTargets', testId: 'excluded-targets', required: false },
+]
+const BUDGET_KEYS: Array<keyof AcquisitionSearchBudget> = [
+  'maxKeywords',
+  'maxVideosPerKeyword',
+  'maxCommentsPerVideo',
+  'maxAuthorVideos',
+  'maxPages',
+  'maxDurationMinutes',
+  'maxLlmCalls',
 ]
 
 const activeStep = ref(0)
@@ -351,6 +482,9 @@ const capabilitiesError = ref('')
 const accounts = ref<SocialAccount[]>([])
 const accountsLoading = ref(false)
 const accountsError = ref('')
+const submitting = ref(false)
+const submitError = ref('')
+const lockedSummary = ref<CreateAcquisitionJobResponse | null>(null)
 let accountsRequestToken = 0
 
 const capability = computed(() => capabilities.value?.platforms[draft.value.platform] ?? null)
@@ -364,6 +498,13 @@ const preflightClass = computed(() => {
   if (capabilitiesLoading.value) return 'neutral'
   if (capabilitiesError.value || !capability.value?.available) return 'blocked'
   return 'ready'
+})
+const confirmationPayload = computed(() => {
+  try {
+    return buildAcquisitionJobPayload(draft.value)
+  } catch {
+    return null
+  }
 })
 
 function extractError(error: unknown, fallback: string) {
@@ -470,7 +611,9 @@ function executionErrors(): AcquisitionValidationError[] {
 function goNext() {
   const errors = activeStep.value === 0
     ? executionErrors()
-    : validateTargetProfile(draft.value)
+    : activeStep.value === 1
+      ? validateTargetProfile(draft.value)
+      : validateExplorationStrategy(draft.value)
   visibleErrors.value = errors
   if (errors.length > 0) return
   if (activeStep.value === 0) normalizeStages()
@@ -478,9 +621,46 @@ function goNext() {
 }
 
 function goBack() {
-  if (activeStep.value === 0) return
+  if (activeStep.value === 0 || submitting.value) return
   activeStep.value -= 1
   visibleErrors.value = []
+  submitError.value = ''
+}
+
+function clearVisibleErrors() {
+  visibleErrors.value = []
+  submitError.value = ''
+}
+
+function formatList(values: readonly string[] | undefined): string {
+  return values?.length ? values.join(' · ') : '—'
+}
+
+async function submitJob() {
+  if (submitting.value) return
+  let payload
+  try {
+    payload = buildAcquisitionJobPayload(draft.value)
+  } catch (error) {
+    if (error instanceof AcquisitionDraftValidationError) {
+      visibleErrors.value = error.errors
+      submitError.value = t('pipeline.acquisition.fixErrors')
+      return
+    }
+    throw error
+  }
+
+  submitting.value = true
+  submitError.value = ''
+  try {
+    const { data } = await createAcquisitionJob(payload)
+    lockedSummary.value = JSON.parse(JSON.stringify(data)) as CreateAcquisitionJobResponse
+    emit('created', JSON.parse(JSON.stringify(lockedSummary.value)) as CreateAcquisitionJobResponse)
+  } catch (error) {
+    submitError.value = extractError(error, t('pipeline.acquisition.submitFailed'))
+  } finally {
+    submitting.value = false
+  }
 }
 
 function deduplicateErrors(errors: AcquisitionValidationError[]) {
@@ -534,6 +714,69 @@ onMounted(async () => {
   font-weight: 700;
   letter-spacing: .09em;
   text-transform: uppercase;
+}
+
+.locked-summary {
+  display: grid;
+  grid-template-columns: minmax(220px, .75fr) minmax(0, 2fr);
+  gap: 18px;
+  align-items: center;
+  margin: 16px 24px;
+  padding: 14px;
+  border: 1px solid color-mix(in oklch, var(--ok) 35%, var(--border));
+  border-radius: 7px;
+  background: var(--ok-soft);
+}
+
+.locked-summary > div > strong,
+.locked-summary > div > small {
+  display: block;
+}
+
+.locked-summary > div > strong {
+  margin-top: 6px;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.locked-summary > div > small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.locked-mark {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--ok);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.locked-summary dl,
+.confirm-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.locked-summary dt,
+.confirm-summary dt {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.locked-summary dd,
+.confirm-summary dd {
+  margin: 2px 0 0;
+  color: var(--fg);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
 }
 
 .eyebrow {
@@ -962,6 +1205,38 @@ select:disabled {
   margin-bottom: 12px;
 }
 
+.confirm-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.confirm-summary section {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.confirm-summary h5 {
+  margin: 0 0 12px;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.confirm-summary .budget-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.confirm-summary .confirm-keywords {
+  grid-column: 1 / -1;
+}
+
+.confirm-keywords .tag {
+  margin: 0 6px 6px 0;
+}
+
 .form-error {
   margin-top: 18px;
   padding: 12px 14px;
@@ -986,13 +1261,24 @@ select:disabled {
   border-top: 1px solid var(--border);
 }
 
+.submit-error {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklch, var(--err) 30%, var(--border));
+  border-radius: 6px;
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 11px;
+}
+
 .btn {
   min-height: 42px;
 }
 
 @media (max-width: 900px) {
   .choice-grid,
-  .target-grid {
+  .target-grid,
+  .confirm-summary {
     grid-template-columns: 1fr;
   }
 
@@ -1014,6 +1300,17 @@ select:disabled {
   .creator-head,
   .step-panel {
     padding: 18px 14px;
+  }
+
+  .locked-summary {
+    grid-template-columns: 1fr;
+    margin: 14px;
+  }
+
+  .locked-summary dl,
+  .confirm-summary dl,
+  .confirm-summary .budget-summary {
+    grid-template-columns: 1fr;
   }
 
   .creator-head {
