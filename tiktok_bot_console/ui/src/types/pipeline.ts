@@ -305,6 +305,17 @@ export interface AcquisitionKeywordListResponse {
   offset: number
 }
 
+export interface CreateAcquisitionJobPayload extends CreatePipelineJobPayload {
+  campaign: AcquisitionCampaignPayload
+  keywords: AcquisitionKeywordCreatePayload[]
+}
+
+export interface CreateAcquisitionJobResponse {
+  job: PipelineJob
+  campaign: AcquisitionCampaign
+  keywords: AcquisitionKeyword[]
+}
+
 export interface AcquisitionPageParams {
   limit?: number
   offset?: number

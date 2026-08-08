@@ -5,6 +5,10 @@
  */
 
 import type {
+  AcquisitionCampaign,
+  AcquisitionKeyword,
+  CreateAcquisitionJobPayload,
+  CreateAcquisitionJobResponse,
   CreatePipelineJobPayload,
   PipelineJob,
   PipelineJobListParams,
@@ -506,6 +510,7 @@ const PIPELINE_STAGE_ORDER: PipelineStageName[] = [
 
 let mockPipelineSequence = 2
 let mockScheduleSequence = 2
+let mockAcquisitionSequence = 0
 
 const mockStages = (
   stages: PipelineStageName[],
@@ -842,6 +847,80 @@ const createMockPipelineJob = (payload: CreatePipelineJobPayload) => {
   return wrap({ job: clone(job) })
 }
 
+const createMockAcquisitionJob = async (
+  payload: CreateAcquisitionJobPayload,
+): Promise<{ data: CreateAcquisitionJobResponse }> => {
+  const job = (await createMockPipelineJob(payload)).data.job
+  const createdAt = job.createdAt
+  const campaignInput = payload.campaign
+  const campaign: AcquisitionCampaign = {
+    id: ++mockAcquisitionSequence,
+    jobId: job.id,
+    platform: job.platform,
+    countries: [...(campaignInput.countries ?? [])],
+    languages: [...(campaignInput.languages ?? [])],
+    industries: [...(campaignInput.industries ?? [])],
+    products: [...(campaignInput.products ?? [])],
+    customerRoles: [...(campaignInput.customerRoles ?? [])],
+    hardConditions: {
+      excludedSubjects: [...(campaignInput.hardConditions?.excludedSubjects ?? [])],
+      requiredKeywords: [...(campaignInput.hardConditions?.requiredKeywords ?? [])],
+      mustBeBusinessAccount: campaignInput.hardConditions?.mustBeBusinessAccount ?? null,
+      notListed: campaignInput.hardConditions?.notListed ?? null,
+    },
+    preferenceConditions: {
+      employeeCount: campaignInput.preferenceConditions?.employeeCount ?? null,
+      registeredCapital: campaignInput.preferenceConditions?.registeredCapital ?? null,
+      listingStatus: campaignInput.preferenceConditions?.listingStatus ?? null,
+      companyScale: campaignInput.preferenceConditions?.companyScale ?? null,
+      minimumYearsEstablished:
+        campaignInput.preferenceConditions?.minimumYearsEstablished ?? null,
+      maximumYearsEstablished:
+        campaignInput.preferenceConditions?.maximumYearsEstablished ?? null,
+    },
+    excludedTargets: [...(campaignInput.excludedTargets ?? [])],
+    searchBudget: {
+      maxKeywords: campaignInput.searchBudget?.maxKeywords ?? 20,
+      maxVideosPerKeyword: campaignInput.searchBudget?.maxVideosPerKeyword ?? 20,
+      maxCommentsPerVideo: campaignInput.searchBudget?.maxCommentsPerVideo ?? 30,
+      maxAuthorVideos: campaignInput.searchBudget?.maxAuthorVideos ?? 5,
+      maxPages: campaignInput.searchBudget?.maxPages ?? 10,
+      maxDurationMinutes: campaignInput.searchBudget?.maxDurationMinutes ?? 60,
+      maxLlmCalls: campaignInput.searchBudget?.maxLlmCalls ?? 100,
+    },
+    keywordMix: {
+      effectivePercent: campaignInput.keywordMix?.effectivePercent ?? 70,
+      newPercent: campaignInput.keywordMix?.newPercent ?? 30,
+    },
+    createdAt,
+  }
+  const keywords: AcquisitionKeyword[] = payload.keywords.map((input) => ({
+    id: ++mockAcquisitionSequence,
+    jobId: job.id,
+    platform: job.platform,
+    text: input.text,
+    language: input.language ?? '',
+    keywordType: input.keywordType ?? 'industry',
+    source: input.source ?? 'manual',
+    status: input.status ?? 'new',
+    usageCount: 0,
+    videoCount: 0,
+    relevantVideoCount: 0,
+    candidateCount: 0,
+    qualifiedCount: 0,
+    replyCount: 0,
+    businessLeadCount: 0,
+    lastUsedAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  }))
+  return wrap({
+    job: clone(job),
+    campaign: clone(campaign),
+    keywords: clone(keywords),
+  })
+}
+
 const scheduleFromPayload = (
   id: number,
   payload: PipelineSchedulePayload,
@@ -960,6 +1039,8 @@ export const mockApi = {
   getDashboard: () => sleep(150).then(() => wrap(MOCK_DASHBOARD)),
   getPipelineEvents: (limit = 60) => sleep(150).then(() => wrap(MOCK_PIPELINE_EVENTS.slice(0, limit))),
   getPipelineOverview: () => sleep(100).then(() => wrap(MOCK_PIPELINE_OVERVIEW)),
+  createAcquisitionJob: (payload: CreateAcquisitionJobPayload) =>
+    sleep(100).then(() => createMockAcquisitionJob(payload)),
   createPipelineJob: (payload: CreatePipelineJobPayload) =>
     sleep(100).then(() => createMockPipelineJob(payload)),
   listPipelineJobs: (params: PipelineJobListParams = {}) => sleep(80).then(() => {

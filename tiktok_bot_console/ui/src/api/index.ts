@@ -20,6 +20,8 @@ import type {
   CandidateResponse,
   CandidateReviewAuditListResponse,
   CandidateReviewPayload,
+  CreateAcquisitionJobPayload,
+  CreateAcquisitionJobResponse,
   CreatePipelineJobPayload,
   PipelineCapabilities,
   PipelineJobListParams,
@@ -212,6 +214,8 @@ const realApi = {
   getUserDetail: (username: string) => api.get(`/api/users/${encodeURIComponent(username)}/detail`),
   createPipelineJob: (payload: CreatePipelineJobPayload) =>
     api.post<PipelineJobResponse>('/api/pipeline/jobs', payload),
+  createAcquisitionJob: (payload: CreateAcquisitionJobPayload) =>
+    api.post<CreateAcquisitionJobResponse>('/api/acquisition/jobs', payload),
   listPipelineJobs: (params: PipelineJobListParams = {}) =>
     api.get<PipelineJobListResponse>('/api/pipeline/jobs', { params }),
   getPipelineJob: (jobId: string) =>
@@ -456,6 +460,11 @@ const wrapped = {
 
   // Writes: always real (mock would echo — dev only) — but still go through pickMode
   // so a "real" mode toggle in Settings actually hits the backend.
+  createAcquisitionJob: (payload: CreateAcquisitionJobPayload) => pickMode(
+    () => mockApi.createAcquisitionJob(payload),
+    () => realApi.createAcquisitionJob(payload),
+  )(),
+
   createPipelineJob: (payload: CreatePipelineJobPayload) => pickMode(
     () => mockApi.createPipelineJob(payload),
     withMockFallback(
@@ -576,6 +585,7 @@ export const getUserDetail = wrapped.getUserDetail
 export const getDashboard = wrapped.getDashboard
 export const getPipelineEvents = wrapped.getPipelineEvents
 export const getPipelineOverview = wrapped.getPipelineOverview
+export const createAcquisitionJob = wrapped.createAcquisitionJob
 export const createPipelineJob = wrapped.createPipelineJob
 export const listPipelineJobs = wrapped.listPipelineJobs
 export const getPipelineJob = wrapped.getPipelineJob
