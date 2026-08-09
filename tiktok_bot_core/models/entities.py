@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import Optional
 from sqlalchemy import (
     String, Integer, Float, Boolean, DateTime, Date, ForeignKey, Text, JSON,
-    CheckConstraint, UniqueConstraint, text,
+    CheckConstraint, Index, UniqueConstraint, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -481,6 +481,112 @@ class PipelineJob(Base):
     )
     strategies: Mapped[list["Strategy"]] = relationship(back_populates="job")
     messages: Mapped[list["Message"]] = relationship(back_populates="job")
+
+
+class PipelineJobEvent(Base):
+    """A durable, UI-safe event emitted by one Pipeline Job."""
+
+    __tablename__ = "pipeline_job_events"
+    __table_args__ = (
+        Index(
+            "ix_pipeline_job_events_job_type",
+            "job_id",
+            "event_type",
+        ),
+        {"sqlite_autoincrement": True},
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("pipeline_jobs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    stage: Mapped[str] = mapped_column(String(20), default="", index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    level: Mapped[str] = mapped_column(String(16), default="info", index=True)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        index=True,
+    )
+
+
+class PipelineDecisionCheckpoint(Base):
+    """One durable decision checkpoint associated with a Pipeline Job."""
+
+    __tablename__ = "pipeline_decision_checkpoints"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'resolved', 'expired', 'cancelled')",
+            name="ck_pipeline_checkpoint_status",
+        ),
+        CheckConstraint(
+            "resolution_source IS NULL OR resolution_source IN "
+            "('human', 'timeout', 'system')",
+            name="ck_pipeline_checkpoint_resolution_source",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_pipeline_checkpoint_version",
+        ),
+        Index(
+            "uq_pipeline_checkpoint_job_pending",
+            "job_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("pipeline_jobs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    stage: Mapped[str] = mapped_column(String(20), default="", index=True)
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    option_keys_json: Mapped[list] = mapped_column(JSON, default=list)
+    default_option_key: Mapped[str] = mapped_column(String(80))
+    context_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="pending",
+        server_default="pending",
+        index=True,
+    )
+    deadline_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    resolution_key: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+    resolution_source: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+    operator: Mapped[str] = mapped_column(String(200), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
 
 
 class PipelineJobStage(Base):

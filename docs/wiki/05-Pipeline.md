@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-09（Hermes 关键词视频搜索启动修复）
+> 最后更新: 2026-08-09（Hermes 持久化 Job 事件底座）
 
 ## 单一任务入口
 
@@ -44,6 +44,8 @@ Web UI / REST API / CLI / Scheduler
 | `PipelineRuntime` | 服务启动时恢复中断任务，统一启停 Scheduler/Dispatcher |
 | `PipelineService` | 在强制的 `PipelineRunContext` 内执行六个业务阶段 |
 | `BusinessReadModel` | 把 Job 级 AI 结论投影给现有用户、Lead、仪表盘和报告接口 |
+| `PipelineLiveStore` | 持久化按 Job 隔离的实时事件和决策关卡；提供增量序号与 CAS 终态 |
+| `PipelineLiveEventRecorder` | 通过命名事件和严格白名单写入安全遥测；SQLite 锁冲突时快速 fail-open |
 
 `PipelineRunContext` 固定携带 `job_id/platform/account_id/account_username/
 browser_session`。Job 执行路径没有全局浏览器回退；上下文缺失、平台/账号不匹配或
@@ -79,6 +81,33 @@ AI 获客任务必须通过受认证的 `POST /api/acquisition/jobs` 创建。�
 应用壳在移动端使用底部横向导航，不再由固定侧栏压缩主内容；主导航与系统导航共用独立
 横向滚动区，账户/退出区位于滚动区之外，不能覆盖系统入口。页面级样式不得通过
 `:global(.sidebar)` 改写应用壳，账户区始终可触达，用户仍可主动结束会话。
+
+### H4-A 持久化实时事件底座
+
+Pipeline 实时作战窗口首先建立了两个持久化基础表：
+
+- `pipeline_job_events` 使用 SQLite `AUTOINCREMENT` 的全局单调 sequence，并按
+  `job_id + sequence` 增量读取；删除最大序号后也不会复用。事件保持 append-only，
+  已提交 sequence 不会被合并、覆盖或删除，因此断线客户端使用 `afterSequence` 恢复时
+  不会重复或漏掉已提交事件；
+- `pipeline_decision_checkpoints` 保存版本化关卡、有限选项、服务端默认项、deadline 和
+  resolution。SQLite partial unique index 从数据库层保证同一 Job 同时最多一个 pending
+  checkpoint；resolve 与 cancel 使用条件更新 CAS，人工、超时和取消竞争只有一个终态获胜。
+
+所有事件只能通过生命周期、阶段、浏览、决策和候选等命名记录方法写入。每类 payload 和
+checkpoint context 都执行字段名、类型、长度、嵌套结构和敏感键双重校验；错误终态必须携带
+注册的稳定 error code，公开文案从不可变映射生成，不保存异常正文。Cookie、Token、API Key、
+Authorization、浏览器 Profile、Prompt/Response 和未知字段不能落库。
+
+连续或超额的 `scroll/wait` 高频事件采用 append-only 抑制，不改变已提交 sequence；
+`extract/error/done` 等关键事件始终追加。Recorder 使用独立 `NullPool` Engine 和 50ms SQLite
+锁等待，不提交或回滚调用方事务；遥测写入失败返回 `persisted=false`，不推进内存 watermark、
+不消耗高频预算，也不改变 Pipeline 业务结果。Job 终态成功提交后清理对应内存缓存，后续读取
+仍从数据库恢复权威 watermark。
+
+本 Gate 只交付模型、Store、Recorder 和并发/旧库兼容测试。Runner 尚未向该 Store 写入真实
+Job 事件，`waiting_decision` 状态、10 秒默认、受认证实时 API 和 Web 作战窗口仍属于后续
+H4-B—H4-D，当前页面行为不应被描述为已经支持互动关卡。
 
 ## 阶段执行流程
 
