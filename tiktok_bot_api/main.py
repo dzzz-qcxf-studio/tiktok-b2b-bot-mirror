@@ -74,6 +74,7 @@ from tiktok_bot_core.services.account_leases import (
     AccountBusyError,
     AccountLeaseManager,
 )
+from tiktok_bot_core.services.account_avatar_cache import save_account_avatar
 from tiktok_bot_core.services.interactive_login import (
     InteractiveLoginError,
     InteractiveLoginService,
@@ -653,6 +654,7 @@ def _build_login_account_callbacks(database, *, data_root: Path):
         if auth_version is None:
             auth_version = 2
 
+        cached_avatar: tuple[str, int, bytes] | None = None
         # Database.session owns commit/rollback. No state escapes as logged in
         # unless this whole block commits successfully.
         try:
@@ -735,6 +737,17 @@ def _build_login_account_callbacks(database, *, data_root: Path):
                     and bool(parsed_avatar.netloc)
                 ):
                     target.avatar_url = avatar_url[:1000]
+                    avatar_bytes = getattr(
+                        verification,
+                        "avatar_bytes",
+                        b"",
+                    )
+                    if isinstance(avatar_bytes, bytes) and avatar_bytes:
+                        cached_avatar = (
+                            target.platform,
+                            int(target.id),
+                            avatar_bytes,
+                        )
                 if (
                     isinstance(follower_count, int)
                     and not isinstance(follower_count, bool)
@@ -744,6 +757,13 @@ def _build_login_account_callbacks(database, *, data_root: Path):
                 target.updated_at = datetime.utcnow()
         except IntegrityError as exc:
             raise AccountAliasConflictError() from exc
+        if cached_avatar is not None:
+            save_account_avatar(
+                data_root,
+                platform=cached_avatar[0],
+                account_id=cached_avatar[1],
+                payload=cached_avatar[2],
+            )
 
     return resolve_account, update_account
 

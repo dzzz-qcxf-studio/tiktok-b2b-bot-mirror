@@ -1,6 +1,6 @@
 # 03 · 数据流与 Mock
 
-最后更新：2026-07-13
+最后更新：2026-08-09
 
 ## API 入口
 
@@ -79,3 +79,5 @@ VITE_API_BASE=http://your-backend:8000
 - 错误抛 axios 风格 Error，含 `.response.data.detail`
 - 时间戳一律 ISO8601（`2026-07-11T12:04:18`）
 - 计数 / 比率字段统一为 number（不用字符串）
+- 真实 `getAccounts()` 可同时返回短期 `avatar_url` 与本地缓存派生的 `avatar_data_url`；
+  账号页必须优先后者，避免平台 CDN 签名过期后头像消失。Mock 可只提供原始头像字段。

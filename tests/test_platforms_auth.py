@@ -547,6 +547,44 @@ def test_auth_service_add_invalid_platform(db):
         svc.add_account("facebook", "test")
 
 
+def test_auth_service_lists_and_deletes_durable_cached_avatar(db, tmp_path):
+    from tiktok_bot_core.services.account_avatar_cache import (
+        save_account_avatar,
+    )
+    from tiktok_bot_core.services.auth_service import get_auth_service
+    from tiktok_bot_core.storage.sqlite_store import SqliteStore
+
+    service = get_auth_service()
+    service.data_root = tmp_path
+    with db.session() as session:
+        account = SqliteStore().add_tiktok_account(
+            session,
+            platform="douyin",
+            username="avatar-cache-account",
+            status="logged_in",
+        )
+        account_id = account.id
+
+    assert save_account_avatar(
+        tmp_path,
+        platform="douyin",
+        account_id=account_id,
+        payload=b"\xff\xd8\xff\xe0avatar-bytes",
+    )
+
+    listed = service.list_accounts(platform="douyin")
+    cached = next(item for item in listed if item["id"] == account_id)
+    assert cached["avatar_data_url"].startswith("data:image/jpeg;base64,")
+
+    service.delete_account(account_id)
+
+    assert not any(
+        item["id"] == account_id
+        for item in service.list_accounts(platform="douyin")
+    )
+    assert not (tmp_path / "account_avatars" / f"douyin-{account_id}.img").exists()
+
+
 def test_qr_login_ignores_visitor_cookies():
     """Visitor cookies must never turn a QR session into a logged-in session."""
     import asyncio
@@ -1254,6 +1292,7 @@ def test_production_account_updater_persists_complete_auth_metadata(
             identity_probe_ok=True,
             nickname="真实抖音昵称",
             avatar_url="https://p3.douyinpic.com/avatar.jpeg",
+            avatar_bytes=b"\xff\xd8\xff\xe0avatar-bytes",
             follower_count=321,
         ),
     )
@@ -1281,6 +1320,16 @@ def test_production_account_updater_persists_complete_auth_metadata(
         assert updated.nickname == "真实抖音昵称"
         assert updated.avatar_url == "https://p3.douyinpic.com/avatar.jpeg"
         assert updated.follower_count == 321
+
+    from tiktok_bot_core.services.account_avatar_cache import (
+        load_account_avatar_data_url,
+    )
+
+    assert load_account_avatar_data_url(
+        tmp_path,
+        platform="douyin",
+        account_id=account_id,
+    ).startswith("data:image/jpeg;base64,")
 
 
 def test_production_account_updater_preserves_profile_fields_when_omitted(

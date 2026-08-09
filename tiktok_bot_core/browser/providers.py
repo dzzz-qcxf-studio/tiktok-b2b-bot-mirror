@@ -19,6 +19,10 @@ from tiktok_bot_core.services.auth_service import (
     _has_authenticated_cookie,
     build_auth_paths,
 )
+from tiktok_bot_core.services.account_avatar_cache import (
+    MAX_ACCOUNT_AVATAR_BYTES,
+    is_supported_account_avatar,
+)
 from tiktok_bot_core.services.interactive_login import (
     AuthVerification,
     InteractiveBrowserSession,
@@ -28,6 +32,46 @@ from tiktok_bot_core.services.interactive_login import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_trusted_douyin_avatar_url(value: str) -> bool:
+    parsed = urlsplit(str(value or "").strip())
+    host = (parsed.hostname or "").lower()
+    return bool(
+        parsed.scheme == "https"
+        and (
+            host == "douyinpic.com"
+            or host.endswith(".douyinpic.com")
+            or host == "byteimg.com"
+            or host.endswith(".byteimg.com")
+        )
+    )
+
+
+async def fetch_douyin_avatar_bytes(context: Any, avatar_url: str) -> bytes:
+    """Fetch a fresh signed avatar while the verified browser is still open."""
+
+    if not _is_trusted_douyin_avatar_url(avatar_url):
+        return b""
+    try:
+        response = await context.request.get(
+            avatar_url,
+            headers={"Referer": DouyinInteractiveLoginProvider._HOME_URL},
+            timeout=10_000,
+        )
+        if getattr(response, "ok", False) is not True:
+            return b""
+        headers = getattr(response, "headers", {}) or {}
+        content_length = str(headers.get("content-length", "") or "")
+        if content_length.isdigit() and int(content_length) > MAX_ACCOUNT_AVATAR_BYTES:
+            return b""
+        payload = await response.body()
+        if not isinstance(payload, bytes) or not is_supported_account_avatar(payload):
+            return b""
+        return payload
+    except Exception:
+        logger.info("抖音头像缓存下载失败，保留远程地址回退", exc_info=True)
+        return b""
 
 
 def extract_douyin_profile_metadata(user: Mapping[str, Any]) -> dict[str, Any]:
@@ -437,12 +481,20 @@ class DouyinInteractiveLoginProvider:
         else:
             diagnostic_code = ""
 
+        authenticated = (
+            has_authenticated_cookie
+            and protected_page_ok
+            and identity_probe_ok
+        )
+        avatar_bytes = b""
+        if authenticated and profile_metadata["avatar_url"]:
+            avatar_bytes = await fetch_douyin_avatar_bytes(
+                session.context,
+                profile_metadata["avatar_url"],
+            )
+
         return AuthVerification(
-            authenticated=(
-                has_authenticated_cookie
-                and protected_page_ok
-                and identity_probe_ok
-            ),
+            authenticated=authenticated,
             has_authenticated_cookie=has_authenticated_cookie,
             protected_page_ok=protected_page_ok,
             local_storage_login_detected=local_storage_login_detected,
@@ -450,6 +502,7 @@ class DouyinInteractiveLoginProvider:
             diagnostic_code=diagnostic_code,
             nickname=profile_metadata["nickname"],
             avatar_url=profile_metadata["avatar_url"],
+            avatar_bytes=avatar_bytes,
             follower_count=profile_metadata["follower_count"],
         )
 

@@ -29,6 +29,11 @@ from sqlalchemy.exc import IntegrityError
 
 from tiktok_bot_core.models.entities import TikTokAccount
 from tiktok_bot_core.platforms import Platform, PlatformType, get_platform
+from tiktok_bot_core.services.account_avatar_cache import (
+    delete_account_avatar,
+    load_account_avatar_data_url,
+    save_account_avatar,
+)
 from tiktok_bot_core.storage.database import get_db
 from tiktok_bot_core.storage.sqlite_store import SqliteStore
 
@@ -36,6 +41,18 @@ logger = logging.getLogger(__name__)
 
 # 账号上限常量
 MAX_ACCOUNTS = 5
+
+
+def _database_data_root(database) -> Path:
+    """Keep runtime cache beside the active SQLite database when possible."""
+
+    db_url = str(getattr(database, "db_url", "") or "")
+    prefix = "sqlite:///"
+    if db_url.startswith(prefix):
+        raw_path = db_url[len(prefix):]
+        if raw_path and raw_path != ":memory:":
+            return Path(raw_path).resolve().parent
+    return Path(__file__).resolve().parents[2] / "data"
 
 
 class AccountAliasConflictError(ValueError):
@@ -190,8 +207,17 @@ class AuthService:
     def __init__(self):
         self.db = get_db()
         self.store = SqliteStore()
+        self.data_root = _database_data_root(self.db)
         self._active_sessions: dict[str, dict] = {}
         # session token -> {"platform": str, "username": str, "page": Page, "task": Task}
+
+    def _avatar_data_root(self) -> Path:
+        """Support lightweight test/service instances that bypass __init__."""
+
+        configured = getattr(self, "data_root", None)
+        if configured is not None:
+            return Path(configured)
+        return _database_data_root(self.db)
 
     # ============ 多账号 CRUD（真实） ============
 
@@ -212,6 +238,11 @@ class AuthService:
                     "display_name": a.display_name or "",
                     "nickname": a.nickname or f"@{a.username}",
                     "avatar_url": a.avatar_url or "",
+                    "avatar_data_url": load_account_avatar_data_url(
+                        self._avatar_data_root(),
+                        platform=a.platform,
+                        account_id=a.id,
+                    ),
                     "status": a.status,
                     "login_method": a.login_method,
                     "browser_provider": a.browser_provider or "",
@@ -257,6 +288,11 @@ class AuthService:
                 "display_name": account.display_name or "",
                 "nickname": account.nickname or f"@{account.username}",
                 "avatar_url": account.avatar_url or "",
+                "avatar_data_url": load_account_avatar_data_url(
+                    self._avatar_data_root(),
+                    platform=account.platform,
+                    account_id=account.id,
+                ),
                 "status": account.status,
                 "login_method": account.login_method,
                 "browser_provider": account.browser_provider or "",
@@ -344,8 +380,18 @@ class AuthService:
             raise AccountAliasConflictError() from exc
 
     def delete_account(self, aid: int):
+        removed: tuple[str, int] | None = None
         with self.db.session() as s:
+            account = self.store.get_tiktok_account(s, aid)
+            if account is not None:
+                removed = (account.platform, account.id)
             self.store.delete_tiktok_account(s, aid)
+        if removed is not None:
+            delete_account_avatar(
+                self._avatar_data_root(),
+                platform=removed[0],
+                account_id=removed[1],
+            )
 
     def get_account(self, aid: int):
         with self.db.session() as s:
@@ -890,6 +936,7 @@ class AuthService:
         from tiktok_bot_core.browser.providers import (
             DouyinInteractiveLoginProvider,
             extract_douyin_profile_metadata,
+            fetch_douyin_avatar_bytes,
         )
 
         # 在自己的 session 内拷贝需要的字段，避免把 ORM 对象带出去触发
@@ -900,6 +947,7 @@ class AuthService:
             )
             if not acc or not acc.cookies_json:
                 return False
+            account_id = acc.id
             cookies_json = acc.cookies_json
 
         browser = BrowserClient()
@@ -963,6 +1011,12 @@ class AuthService:
                 return False
 
             profile = extract_douyin_profile_metadata(user)
+            avatar_bytes = b""
+            if profile["avatar_url"]:
+                avatar_bytes = await fetch_douyin_avatar_bytes(
+                    browser._context,
+                    profile["avatar_url"],
+                )
             with self.db.session() as session:
                 stored = self.store.get_tiktok_account_by_username(
                     session,
@@ -978,6 +1032,14 @@ class AuthService:
                     if follower_count is not None:
                         stored.follower_count = follower_count
                     stored.updated_at = datetime.utcnow()
+            if avatar_bytes:
+                await asyncio.to_thread(
+                    save_account_avatar,
+                    self._avatar_data_root(),
+                    platform=platform,
+                    account_id=account_id,
+                    payload=avatar_bytes,
+                )
             return True
         except Exception as e:
             logger.warning(f"会话检测失败: {e}")

@@ -110,7 +110,7 @@ GET    /api/stats/dashboard                  # Dashboard 概览
 GET    /api/stats/wordcloud                  # 词云数据
 
 # 社交账号（TikTok + 抖音）
-GET    /api/accounts                         # 列出账号（可按平台过滤）
+GET    /api/accounts                         # 列出账号；avatar_data_url 优先于短期 avatar_url 展示
 POST   /api/accounts                         # 添加账号元信息
 PUT    /api/accounts/{aid}                   # 修改本地展示名称，不改变浏览器隔离 alias
 DELETE /api/accounts/{aid}                   # 删除账号

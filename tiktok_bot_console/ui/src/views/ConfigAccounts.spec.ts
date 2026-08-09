@@ -39,6 +39,7 @@ const account = {
   display_name: '华南销售号',
   nickname: '真实抖音昵称',
   avatar_url: 'https://p3.douyinpic.com/avatar.jpeg',
+  avatar_data_url: 'data:image/jpeg;base64,YXZhdGFy',
   status: 'logged_in',
   statusKey: 'on',
   login_method: 'interactive_browser',
@@ -87,7 +88,7 @@ describe('ConfigAccounts', () => {
     expect(wrapper.text()).toContain('华南销售号')
     expect(wrapper.text()).toContain('真实抖音昵称')
     const avatar = wrapper.get('img.account-avatar')
-    expect(avatar.attributes('src')).toBe(account.avatar_url)
+    expect(avatar.attributes('src')).toBe(account.avatar_data_url)
     expect(avatar.attributes('referrerpolicy')).toBe('no-referrer')
   })
 

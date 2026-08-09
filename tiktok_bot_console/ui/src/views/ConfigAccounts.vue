@@ -489,7 +489,13 @@ async function loadAccounts() {
       browserProvider: String(account.browserProvider ?? account.browser_provider ?? ''),
       browserProfileId: String(account.browserProfileId ?? account.browser_profile_id ?? ''),
       displayName: String(account.displayName ?? account.display_name ?? ''),
-      avatarUrl: String(account.avatarUrl ?? account.avatar_url ?? ''),
+      avatarUrl: String(
+        account.avatarDataUrl
+        ?? account.avatar_data_url
+        ?? account.avatarUrl
+        ?? account.avatar_url
+        ?? ''
+      ),
       avatarFailed: false,
     })) as Account[]
   } catch (error: unknown) {

@@ -71,6 +71,7 @@ class AuthVerification:
     diagnostic_code: str = ""
     nickname: str = ""
     avatar_url: str = ""
+    avatar_bytes: bytes = field(default=b"", repr=False)
     follower_count: int | None = None
 
 

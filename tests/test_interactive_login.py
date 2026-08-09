@@ -119,6 +119,14 @@ def fake_chromium(monkeypatch):
     context.cookies = AsyncMock(
         return_value=authenticated_douyin_cookies()
     )
+    avatar_response = MagicMock()
+    avatar_response.ok = True
+    avatar_response.headers = {"content-type": "image/jpeg"}
+    avatar_response.body = AsyncMock(
+        return_value=b"\xff\xd8\xff\xe0avatar-bytes"
+    )
+    context.request = MagicMock()
+    context.request.get = AsyncMock(return_value=avatar_response)
     context.storage_state = AsyncMock(
         return_value={"cookies": [], "origins": []}
     )
@@ -421,6 +429,7 @@ async def test_verify_extracts_safe_douyin_profile_metadata(
 
     assert result.nickname == "真实抖音昵称"
     assert result.avatar_url == "https://p3.douyinpic.com/avatar.jpeg"
+    assert result.avatar_bytes == b"\xff\xd8\xff\xe0avatar-bytes"
     assert result.follower_count == 321
 
 

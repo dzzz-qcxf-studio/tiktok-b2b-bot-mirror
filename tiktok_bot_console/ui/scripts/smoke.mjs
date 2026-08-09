@@ -540,6 +540,12 @@ const configChecks = [
       && configAccountsSrc.includes('providerConfigured'),
   ],
   [
+    'account cards prefer durable cached avatars over expiring remote URLs',
+    configAccountsSrc.includes('account.avatarDataUrl')
+      && configAccountsSrc.includes('account.avatar_data_url')
+      && configAccountsSrc.indexOf('account.avatar_data_url') < configAccountsSrc.indexOf('account.avatar_url'),
+  ],
+  [
     'Douyin account page explains isolated configured concurrency',
     configAccountsSrc.includes('douyinConcurrency')
       && configAccountsSrc.includes('maxConcurrency'),

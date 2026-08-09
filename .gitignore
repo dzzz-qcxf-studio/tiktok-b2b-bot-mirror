@@ -47,6 +47,7 @@ data/logs/
 data/screenshots/
 data/browser_profiles/
 data/auth_states/
+data/account_avatars/
 tiktok_bot_core/data/browser_profiles/
 tiktok_bot_core/data/auth_states/
 
