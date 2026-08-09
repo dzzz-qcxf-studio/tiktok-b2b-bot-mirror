@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-09（Hermes H2 获客创建器）
+> 最后更新: 2026-08-09（Hermes 关键词视频搜索启动修复）
 
 ## 单一任务入口
 
@@ -89,9 +89,11 @@ Runner 为每个 Stage: pending → running → terminal
   │   ├── 无 AcquisitionCampaign → 保持旧关键词用户搜索路径
   │   └── 有 AcquisitionCampaign → 新获客路径
   │       ├── 冻结画像 + effective/new 70/30 关键词计划
-  │       ├── Pipeline 注入 HermesEvidenceAgent，视频/评论优先、用户搜索辅助
+  │       ├── Pipeline 注入 HermesEvidenceAgent，先确定性进入关键词视频搜索页
+  │       ├── 视频/评论优先；即使 Agent 达到 max_steps，仍执行直接用户辅助搜索
   │       ├── 跨关键词共享 keywords/videos/comments/pages/duration/LLM 等预算
   │       ├── Schema、平台、整批预算和权威 metrics 双重校验
+  │       ├── 全部关键词 max_steps 且视频/用户证据均为零时失败关闭
   │       └── 批量写用户/Job 关联/多来源证据；相同重试幂等
   │
   ├── 阶段2 _run_filter:
@@ -145,6 +147,18 @@ Runner 为每个 Stage: pending → running → terminal
 阶段 01 的 `usage_count` 以 Job 为一次 execution：同一 Job 的阶段重试仍为 1；新增视频、
 相关视频和候选数从该 Job 持久化后的不同证据重新聚合。预算耗尽不会全量降级，只把
 实际受截断的候选置为 `needs_more_evidence`。阶段 01 永远不能产生 `qualified` 或发送消息。
+浏览器任务不会从 `about:blank` 等待模型猜测搜索入口，而是在同一秒级 deadline 内通过
+`Platform.search_video_url()` 进入当前关键词视频搜索页并计为一次页面访问。模型
+`max_steps` 只是视频探索终止原因，不会跳过 `direct_users` 辅助路径；如果所有关键词均以
+该原因结束且两条路径都没有任何视频或用户证据，Collector 抛出稳定错误
+`search_exhausted_without_evidence`，Stage/Job 按既有失败状态机落库，不能显示为成功空结果。
+迭代模型偶发返回非法 JSON 时，该次调用记录为无效步骤，并继续下一次有界决策；它同时
+消耗一个 step 和一次 LLM call，不扩张任务预算。认证、配置、熔断等路由错误仍立即失败。
+单次 `network / timeout / upstream_server` 也按相同预算继续下一步；限流、认证、配置与
+熔断不在此范围，避免无意义地连续请求。
+页面预算由每关键词与 totals 的权威 `pages` 访问计数双重验证；证据中的 `video_url`、
+`comment_url`、`author_url` 是可在同一页面读取的引用，不按 URL 个数冒充页面访问数。
+视频、评论、作者视频、用户与总证据仍分别执行独立硬上限校验。
 
 阶段 02 的四个状态为 `qualified / manual_review / need_enrichment / rejected`。人工复核可
 直接通过或淘汰，不强制先补资料。AI 永远不能写 `qualified` 或 `rejected` 两个终态；模型

@@ -42,13 +42,17 @@ class Platform:
     name: str
     home_url: str
     search_user_url_tpl: str
+    search_video_url_tpl: str
     user_profile_url_tpl: str
     login_url: str
     # CSS 选择器差异（部分组件命名空间不同）
     selectors: dict[str, str]
 
     def search_user_url(self, keyword: str) -> str:
-        return self.search_user_url_tpl.format(kw=quote(keyword))
+        return self.search_user_url_tpl.format(kw=quote(keyword, safe=""))
+
+    def search_video_url(self, keyword: str) -> str:
+        return self.search_video_url_tpl.format(kw=quote(keyword, safe=""))
 
     def user_profile_url(self, username: str) -> str:
         return self.user_profile_url_tpl.format(username=username)
@@ -60,6 +64,7 @@ TIKTOK = Platform(
     name="tiktok",
     home_url="https://www.tiktok.com/",
     search_user_url_tpl="https://www.tiktok.com/search?q={kw}&type=user",
+    search_video_url_tpl="https://www.tiktok.com/search/video?q={kw}",
     user_profile_url_tpl="https://www.tiktok.com/@{username}",
     login_url="https://www.tiktok.com/login",
     selectors={
@@ -84,6 +89,7 @@ DOUYIN = Platform(
     name="douyin",
     home_url="https://www.douyin.com/",
     search_user_url_tpl="https://www.douyin.com/search/{kw}?type=user",
+    search_video_url_tpl="https://www.douyin.com/search/{kw}?type=video",
     user_profile_url_tpl="https://www.douyin.com/user/{username}",
     login_url="https://www.douyin.com/",
     selectors={

@@ -724,6 +724,104 @@ async def test_agent_propagates_llm_route_error_with_safe_message():
 
 
 @pytest.mark.asyncio
+async def test_agent_retries_invalid_json_within_existing_step_budget():
+    """单次非法 JSON 记为无效步骤，下一步可恢复且不会绕过调用预算。"""
+
+    from tiktok_bot_core.llm.router import LLMRouteError
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[
+            LLMRouteError(route="iteration", error_category="invalid_json"),
+            {"action": "done", "payload": {"summary": "recovered"}},
+        ]
+    )
+    browser = FakeBrowserClient()
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: browser,
+        max_steps=3,
+        max_llm_calls=3,
+    )
+
+    result = await agent.run(goal="测试", platform="douyin", account_id=1)
+
+    assert result.status == "done"
+    assert result.summary == "recovered"
+    assert result.steps == 2
+    assert result.steps_detail[0].action is None
+    assert result.steps_detail[0].rationale == "invalid: invalid_json"
+    assert result.budget_usage["llm_calls"] == 2
+    assert router.json_completion.await_count == 2
+    assert browser.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_category", ["network", "timeout", "upstream_server"])
+async def test_agent_retries_transient_error_within_existing_budget(
+    error_category,
+):
+    """单次瞬时故障不得终止整词搜索，也不得绕过现有预算。"""
+
+    from tiktok_bot_core.llm.router import LLMRouteError
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[
+            LLMRouteError(route="iteration", error_category=error_category),
+            {"action": "done", "payload": {"summary": "recovered"}},
+        ]
+    )
+    browser = FakeBrowserClient()
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: browser,
+        max_steps=3,
+        max_llm_calls=3,
+    )
+
+    result = await agent.run(goal="测试", platform="douyin", account_id=1)
+
+    assert result.status == "done"
+    assert result.summary == "recovered"
+    assert result.steps == 2
+    assert result.steps_detail[0].rationale == f"retryable: {error_category}"
+    assert result.budget_usage["llm_calls"] == 2
+    assert router.json_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_stops_transient_retries_at_llm_call_budget():
+    """连续瞬时故障必须在既有 LLM 调用预算耗尽时停止。"""
+
+    from tiktok_bot_core.llm.router import LLMRouteError
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=LLMRouteError(route="iteration", error_category="network")
+    )
+    browser = FakeBrowserClient()
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: browser,
+        max_steps=5,
+        max_llm_calls=2,
+    )
+
+    result = await agent.run(goal="测试", platform="douyin", account_id=1)
+
+    assert result.status == "timeout"
+    assert result.exhaustion_reason == "max_llm_calls"
+    assert result.steps == 2
+    assert result.budget_usage["llm_calls"] == 2
+    assert router.json_completion.await_count == 2
+    assert browser.closed is True
+
+
+@pytest.mark.asyncio
 async def test_agent_closes_browser_even_when_decision_parsing_fails():
     """LLM 返回非法 JSON 时必须清理浏览器，不能泄漏资源。"""
 

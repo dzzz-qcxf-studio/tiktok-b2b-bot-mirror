@@ -6,7 +6,7 @@
 import logging
 import math
 import time
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from tiktok_bot_core.extensions.registry import CollectorPlugin
 from tiktok_bot_core.browser.providers import require_browser_client
@@ -130,6 +130,7 @@ class KeywordCollector(CollectorPlugin):
         remaining_pages = budget.max_pages
         remaining_llm_calls = budget.max_llm_calls
         deadline = self._monotonic() + budget.max_duration_minutes * 60
+        unproductive_agent_keywords: list[str] = []
 
         for keyword in keywords:
             if not tracker.allow_keyword(keyword):
@@ -146,6 +147,7 @@ class KeywordCollector(CollectorPlugin):
                 "duration_seconds": 0.0,
             }
             exhaustion_reason = ""
+            agent_exhaustion_reason = ""
             visited_urls: list[str] = []
             try:
                 if evidence_agent is not None and remaining_llm_calls > 0:
@@ -197,6 +199,7 @@ class KeywordCollector(CollectorPlugin):
                         getattr(evidence_agent, "last_exhaustion_reason", "")
                         or ""
                     )
+                    agent_exhaustion_reason = exhaustion_reason
                     raw_visited_urls = getattr(
                         evidence_agent, "last_visited_urls", None
                     )
@@ -275,7 +278,7 @@ class KeywordCollector(CollectorPlugin):
                 self._merge_candidates(merged, primary)
 
                 if (
-                    exhaustion_reason in {"", "max_llm_calls"}
+                    exhaustion_reason in {"", "max_llm_calls", "max_steps"}
                     and not tracker.exhausted
                     and remaining_pages > 0
                     and deadline > self._monotonic()
@@ -321,6 +324,16 @@ class KeywordCollector(CollectorPlugin):
                     visited_urls=visited_urls,
                     platform=platform,
                 )
+                metric_key = (
+                    str(keyword_id) if keyword_id is not None else keyword
+                )
+                recorded = keyword_metrics[metric_key]
+                if (
+                    agent_exhaustion_reason == "max_steps"
+                    and recorded["videos_explored"] == 0
+                    and recorded["candidate_count"] == 0
+                ):
+                    unproductive_agent_keywords.append(keyword)
             except Exception as exc:
                 logger.error(
                     "[KeywordCollector:%s] 获客搜索 '%s' 失败: %s",
@@ -328,6 +341,13 @@ class KeywordCollector(CollectorPlugin):
                     keyword,
                     exc,
                 )
+
+        if (
+            keywords
+            and len(unproductive_agent_keywords) == len(keywords)
+            and not merged
+        ):
+            raise RuntimeError("search_exhausted_without_evidence")
 
         # A normally exhausted production run still emits an authoritative
         # zero-usage record for every planned keyword. Collector errors above
@@ -540,9 +560,7 @@ class KeywordCollector(CollectorPlugin):
     ) -> list[dict]:
         """Discover video authors and comment authors within explicit budgets."""
         search_url = (
-            f"https://www.tiktok.com/search/video?q={quote(keyword)}"
-            if platform is PlatformType.TIKTOK
-            else f"https://www.douyin.com/search/{quote(keyword)}?type=video"
+            pf.search_video_url(keyword)
         )
         await browser.navigate(search_url)
         await browser.wait(2500)

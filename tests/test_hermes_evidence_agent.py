@@ -31,8 +31,9 @@ class _Body:
 
 
 class _LeasedBrowser:
-    def __init__(self):
-        self.current_url = "https://www.douyin.com/search/test"
+    def __init__(self, initial_url="https://www.douyin.com/search/test"):
+        self.current_url = initial_url
+        self.navigations = []
         self.init = AsyncMock()
         self.close = AsyncMock()
 
@@ -40,6 +41,7 @@ class _LeasedBrowser:
         return b"jpg"
 
     async def navigate(self, url):
+        self.navigations.append(url)
         self.current_url = url
 
     async def click(self, selector):
@@ -72,6 +74,35 @@ def _evidence(
         author_url=f"https://www.douyin.com/user/{user_id}",
         source_path=["keyword", "video", "comment", "author"],
     ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_collect_keyword_bootstraps_platform_video_search_before_llm():
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        return_value={"action": "done", "payload": {"summary": "done"}}
+    )
+    browser = _LeasedBrowser(initial_url="about:blank")
+    agent = HermesEvidenceAgent(router=router, bus=EventBus(), max_steps=10)
+
+    candidates = await agent.collect_keyword(
+        browser=browser,
+        keyword="变压器 采购",
+        keyword_id=7,
+        platform="douyin",
+        account_id=3,
+        budget=ExplorationBudget(),
+    )
+
+    expected_url = (
+        "https://www.douyin.com/search/"
+        "%E5%8F%98%E5%8E%8B%E5%99%A8%20%E9%87%87%E8%B4%AD?type=video"
+    )
+    assert candidates == []
+    assert browser.navigations == [expected_url]
+    assert f"url: {expected_url}" in router.json_completion.await_args.args[0]
+    assert agent.last_visited_urls == [expected_url]
+    assert agent.last_budget_usage["pages"] == 1
 
 
 @pytest.mark.asyncio

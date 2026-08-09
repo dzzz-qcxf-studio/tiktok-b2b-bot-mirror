@@ -169,6 +169,12 @@ def test_tiktok_platform_urls():
     assert "/@{username}" in pf.user_profile_url_tpl
     # 中文关键词自动 URL 编码
     assert "%E6%91%87" not in pf.search_user_url("中文") or "=" in pf.search_user_url("中文")
+    assert pf.search_video_url("中文") == (
+        "https://www.tiktok.com/search/video?q=%E4%B8%AD%E6%96%87"
+    )
+    assert pf.search_video_url("电力/基建?# A").endswith(
+        "q=%E7%94%B5%E5%8A%9B%2F%E5%9F%BA%E5%BB%BA%3F%23%20A"
+    )
     # username URL 也正确编码
     url = pf.user_profile_url("alice_中文")
     assert "alice" in url
@@ -180,6 +186,13 @@ def test_douyin_platform_urls():
     assert "douyin.com" in pf.home_url
     # 抖音搜索是 path 参数
     assert "{kw}" in pf.search_user_url_tpl
+    assert pf.search_video_url("中文") == (
+        "https://www.douyin.com/search/%E4%B8%AD%E6%96%87?type=video"
+    )
+    assert pf.search_video_url("电力/基建?# A") == (
+        "https://www.douyin.com/search/"
+        "%E7%94%B5%E5%8A%9B%2F%E5%9F%BA%E5%BB%BA%3F%23%20A?type=video"
+    )
     assert "/user/{username}" in pf.user_profile_url_tpl
 
 

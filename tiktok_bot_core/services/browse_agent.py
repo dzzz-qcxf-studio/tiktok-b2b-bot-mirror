@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 ALLOWED_ACTIONS: frozenset[str] = frozenset(
     {"navigate", "click", "scroll", "wait", "extract", "done"}
 )
+_RETRYABLE_ITERATION_ERROR_CATEGORIES = frozenset(
+    {"network", "timeout", "upstream_server"}
+)
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,7 @@ class BrowseAgent:
         goal: str,
         platform: str,
         account_id: int,
+        start_url: str = "",
     ) -> BrowseResult:
         started_at = self._monotonic()
         deadline = started_at + self._max_duration_seconds
@@ -334,15 +338,49 @@ class BrowseAgent:
                     await _await_with_deadline(
                         browser.init(), deadline=deadline, monotonic=self._monotonic
                     )
-
-                current_url = str(getattr(browser, "current_url", "") or "")
-                if current_url and current_url != "about:blank":
-                    if not _platform_url_is_safe(platform, current_url):
+                    initialized_url = str(
+                        getattr(browser, "current_url", "") or ""
+                    )
+                    if not _platform_url_is_safe(
+                        platform, initialized_url, allow_empty=True
+                    ):
                         status = "error"
                         exhaustion_reason = "unsafe_url"
+
+                normalized_start_url = str(start_url or "").strip()
+                if not exhaustion_reason:
+                    if normalized_start_url:
+                        if not _platform_url_is_safe(
+                            platform, normalized_start_url
+                        ):
+                            status = "error"
+                            exhaustion_reason = "unsafe_url"
+                        else:
+                            await _await_with_deadline(
+                                browser.navigate(normalized_start_url),
+                                deadline=deadline,
+                                monotonic=self._monotonic,
+                            )
+                            current_url = str(
+                                getattr(browser, "current_url", "") or ""
+                            )
+                            if not _platform_url_is_safe(platform, current_url):
+                                status = "error"
+                                exhaustion_reason = "unsafe_url"
+                            else:
+                                pages = 1
+                                record_safe_url(current_url)
                     else:
-                        pages = 1
-                        record_safe_url(current_url)
+                        current_url = str(
+                            getattr(browser, "current_url", "") or ""
+                        )
+                        if current_url and current_url != "about:blank":
+                            if not _platform_url_is_safe(platform, current_url):
+                                status = "error"
+                                exhaustion_reason = "unsafe_url"
+                            else:
+                                pages = 1
+                                record_safe_url(current_url)
 
                 for step_no in range(1, self._max_steps + 1):
                     if exhaustion_reason:
@@ -391,8 +429,26 @@ class BrowseAgent:
                         )
                     except (asyncio.TimeoutError, TimeoutError):
                         raise
-                    except LLMRouteError:
-                        raise
+                    except LLMRouteError as exc:
+                        if exc.error_category == "invalid_json":
+                            rationale = "invalid: invalid_json"
+                        elif (
+                            exc.error_category
+                            in _RETRYABLE_ITERATION_ERROR_CATEGORIES
+                        ):
+                            rationale = f"retryable: {exc.error_category}"
+                        else:
+                            raise
+                        steps.append(
+                            BrowseStep(
+                                step=step_no,
+                                action=None,
+                                screenshot_hash=shot_hash,
+                                rationale=rationale,
+                            )
+                        )
+                        self._publish_step(platform, account_id, steps[-1])
+                        continue
                     except Exception as exc:  # JSON 解析 / KeyError 等
                         raise LLMRouteError(
                             route="iteration",

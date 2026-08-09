@@ -507,7 +507,6 @@ class PipelineService:
         videos_by_keyword: dict[tuple[str, object], set[str]] = {}
         comments_by_video: dict[str, set[str]] = {}
         author_videos: dict[str, set[str]] = {}
-        page_urls: set[str] = set()
         for candidate in candidates:
             for observation in candidate.evidence:
                 if observation.keyword_id is not None:
@@ -530,15 +529,6 @@ class PipelineService:
                     author_videos.setdefault(candidate.platform_user_id, set()).add(
                         observation.video_id
                     )
-                page_urls.update(
-                    value
-                    for value in (
-                        observation.video_url,
-                        observation.comment_url,
-                        observation.author_url,
-                    )
-                    if value
-                )
 
         if any(
             len(items) > budget.max_videos_per_keyword
@@ -555,8 +545,6 @@ class PipelineService:
             for items in author_videos.values()
         ):
             raise ValueError("collector batch exceeds author video budget")
-        if len(page_urls) > budget.max_pages:
-            raise ValueError("collector batch exceeds page budget")
         metrics = collection_metrics.get("keywords", {})
         if not isinstance(metrics, dict):
             raise ValueError("collector metrics must be a mapping")

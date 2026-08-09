@@ -229,6 +229,69 @@ async def test_hermes_extract_accumulates_only_schema_valid_observations():
     assert result.steps_detail[1].action is None
 
 
+@pytest.mark.asyncio
+async def test_browse_start_url_does_not_recover_an_unsafe_existing_page():
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        return_value={"action": "done", "payload": {"summary": "done"}}
+    )
+    browser = _Browser()
+    browser.current_url = "https://evil.example/intercepted"
+    browser.navigate = AsyncMock()
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: browser,
+        max_steps=1,
+    )
+
+    result = await agent.run(
+        goal="collect public evidence",
+        platform="douyin",
+        account_id=1,
+        start_url="https://www.douyin.com/search/test?type=video",
+    )
+
+    assert result.status == "error"
+    assert result.exhaustion_reason == "unsafe_url"
+    browser.navigate.assert_not_awaited()
+    router.json_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browse_start_url_rejects_an_unsafe_page_created_by_init():
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        return_value={"action": "done", "payload": {"summary": "done"}}
+    )
+    browser = _Browser()
+    browser.current_url = "about:blank"
+
+    async def init_to_unsafe_page():
+        browser.current_url = "https://evil.example/after-init"
+
+    browser.init = AsyncMock(side_effect=init_to_unsafe_page)
+    browser.navigate = AsyncMock()
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: browser,
+        max_steps=1,
+    )
+
+    result = await agent.run(
+        goal="collect public evidence",
+        platform="douyin",
+        account_id=1,
+        start_url="https://www.douyin.com/search/test?type=video",
+    )
+
+    assert result.status == "error"
+    assert result.exhaustion_reason == "unsafe_url"
+    browser.navigate.assert_not_awaited()
+    router.json_completion.assert_not_awaited()
+
+
 @pytest.fixture
 def acquisition_db():
     with NamedTemporaryFile(suffix=".db", delete=False) as file:
@@ -868,6 +931,130 @@ async def test_direct_user_auxiliary_runs_after_shared_llm_budget_is_exhausted()
 
 
 @pytest.mark.asyncio
+async def test_direct_user_auxiliary_runs_after_hermes_max_steps_without_evidence():
+    evidence_agent = MagicMock()
+
+    async def collect_keyword(**_kwargs):
+        evidence_agent.last_budget_usage = {
+            "pages": 1,
+            "llm_calls": 10,
+            "duration_seconds": 1.0,
+        }
+        evidence_agent.last_exhaustion_reason = "max_steps"
+        evidence_agent.last_visited_urls = []
+        return []
+
+    evidence_agent.collect_keyword = AsyncMock(side_effect=collect_keyword)
+    collector = KeywordCollector(monotonic=lambda: 0.0)
+    collector._search_one = AsyncMock(return_value=[{
+        "tiktok_id": "douyin:direct-after-max-steps",
+        "username": "direct-after-max-steps",
+    }])
+
+    candidates = await collector.collect({
+        "platform": "douyin",
+        "keywords": ["direct"],
+        "keyword_ids": {"direct": 1},
+        "acquisition_mode": True,
+        "browser_session": BrowserSession(
+            platform="douyin", account_id=9, client=MagicMock()
+        ),
+        "evidence_agent": evidence_agent,
+        "account_id": 9,
+        "budget": {
+            "max_keywords": 1,
+            "max_profiles": 2,
+            "max_total_observations": 2,
+            "max_pages": 3,
+            "max_llm_calls": 10,
+        },
+    })
+
+    collector._search_one.assert_awaited_once()
+    assert [item["platform_user_id"] for item in candidates] == [
+        "direct-after-max-steps"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hermes_max_steps_without_video_or_direct_user_fails_closed():
+    evidence_agent = MagicMock()
+
+    async def collect_keyword(**_kwargs):
+        evidence_agent.last_budget_usage = {
+            "pages": 1,
+            "llm_calls": 10,
+            "duration_seconds": 1.0,
+        }
+        evidence_agent.last_exhaustion_reason = "max_steps"
+        evidence_agent.last_visited_urls = []
+        return []
+
+    evidence_agent.collect_keyword = AsyncMock(side_effect=collect_keyword)
+    collector = KeywordCollector(monotonic=lambda: 0.0)
+    collector._search_one = AsyncMock(return_value=[])
+
+    with pytest.raises(RuntimeError, match="search_exhausted_without_evidence"):
+        await collector.collect({
+            "platform": "douyin",
+            "keywords": ["empty"],
+            "keyword_ids": {"empty": 1},
+            "acquisition_mode": True,
+            "browser_session": BrowserSession(
+                platform="douyin", account_id=9, client=MagicMock()
+            ),
+            "evidence_agent": evidence_agent,
+            "account_id": 9,
+            "budget": {
+                "max_keywords": 1,
+                "max_pages": 3,
+                "max_llm_calls": 10,
+            },
+        })
+
+
+@pytest.mark.asyncio
+async def test_hermes_explicit_done_with_empty_search_is_a_valid_empty_result():
+    evidence_agent = MagicMock()
+
+    async def collect_keyword(**_kwargs):
+        evidence_agent.last_budget_usage = {
+            "pages": 1,
+            "llm_calls": 1,
+            "duration_seconds": 0.1,
+        }
+        evidence_agent.last_exhaustion_reason = ""
+        evidence_agent.last_visited_urls = [
+            "https://www.douyin.com/search/empty?type=video"
+        ]
+        return []
+
+    evidence_agent.collect_keyword = AsyncMock(side_effect=collect_keyword)
+    collector = KeywordCollector(monotonic=lambda: 0.0)
+    collector._search_one = AsyncMock(return_value=[])
+
+    candidates = await collector.collect({
+        "platform": "douyin",
+        "keywords": ["empty"],
+        "keyword_ids": {"empty": 1},
+        "acquisition_mode": True,
+        "browser_session": BrowserSession(
+            platform="douyin", account_id=9, client=MagicMock()
+        ),
+        "evidence_agent": evidence_agent,
+        "account_id": 9,
+        "budget": {
+            "max_keywords": 1,
+            "max_pages": 3,
+            "max_llm_calls": 10,
+        },
+    })
+
+    assert candidates == []
+    collector._search_one.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_exact_last_page_marks_only_candidate_from_truncated_keyword():
     evidence_agent = MagicMock()
     call_index = 0
@@ -1265,6 +1452,7 @@ def test_pipeline_accepts_many_direct_users_when_authoritative_llm_total_is_boun
         max_keywords=1,
         max_profiles=3,
         max_total_observations=3,
+        max_pages=1,
         max_llm_calls=1,
     )
     candidates = [

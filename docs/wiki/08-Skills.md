@@ -1,7 +1,7 @@
 # 08 — Hermes Skills 设计
 
 > 关联: [索引](00-索引.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-02
+> 最后更新: 2026-08-09
 
 ## 核心理念
 
@@ -100,6 +100,7 @@ tools_required:
 Hermes → tiktok-browse Skill
    └─ CLI: tiktok-bot browse run --platform douyin --account-id 1 --goal "..."
         └─ Core: BrowseAgent.run()
+              ├─ 可选 start_url 在预算内确定性进入平台搜索页
               ├─ 截图哈希 + 最多 100 个交互/链接节点的安全 DOM snapshot → iteration LLM
               ├─ LLM 输出受限动作集合（navigate / click / scroll / wait / extract / done）
               ├─ _validate_action 拒绝不安全 URL 与 file:// / javascript:
@@ -111,10 +112,21 @@ Hermes → tiktok-browse Skill
 - 动作名是固定 frozenset，LLM 不可扩展
 - `navigate` 只允许 http(s)，host 必须落在 `douyin.com / tiktok.com / iesdouyin.com`
 - `click` 必须给非空 CSS selector；不允许执行任意 JS
-- 初始 URL、动作前后 URL 和 DOM href 都按当前平台校验；外域跳转 fail closed
+- 初始 URL、受管浏览器 `init()` 后 URL、动作前后 URL 和 DOM href 都按当前平台校验；
+  外域跳转 fail closed
+- `start_url` 同样必须属于当前平台；已有页面为外域时不会先导航回安全页再继续，仍然
+  fail closed
 - wait 限 50..10000 ms、scroll 限 1..3000 px；click 在页预算已满时不会先执行
 - 页数、精确秒级 deadline、LLM 次数和阶段 01 多层证据预算都是硬上限；异步
   Browser factory、浏览器动作、LLM、关闭和完成事件均有超时边界
 - `extract.payload.observation` 必须通过 `EvidenceObservation` Schema；逐用户记录截断原因
 - 单步不安全决策记为 `invalid step` 继续循环，不让 LLM 一次坏决策毁掉整次运行
+- `iteration` 单次 `invalid_json` 同样记为 `invalid step` 并在剩余 step/LLM 预算内继续；
+  单次 `network / timeout / upstream_server` 记为 `retryable step`；认证、限流、配置、熔断等
+  其他 `LLMRouteError` 不吞掉，仍由上层按真实故障处理
 - 浏览器在 done / timeout / 错误时都被 `_safe_close` 关闭
+
+阶段 01 的 `HermesEvidenceAgent` 使用 `Platform.search_video_url(keyword)` 传入
+`start_url`。因此真实 Job 浏览器即使刚创建于 `about:blank`，第一次 LLM 调用看到的也会是
+已完成 URL 编码的关键词视频搜索页；该导航包含在页面数和总时长预算中。到达 `max_steps`
+但未提取证据时，上层 KeywordCollector 仍会执行直接用户辅助搜索。

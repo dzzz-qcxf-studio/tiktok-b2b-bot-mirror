@@ -960,6 +960,7 @@ class HermesEvidenceAgent:
         self.last_exhaustion_reason = ""
         self.last_visited_urls = []
         # Lazy import avoids acquisition_agents <-> browse_agent import cycles.
+        from tiktok_bot_core.platforms import get_platform
         from tiktok_bot_core.services.browse_agent import BrowseAgent
 
         agent = BrowseAgent(
@@ -983,6 +984,7 @@ class HermesEvidenceAgent:
             ),
             platform=platform,
             account_id=account_id,
+            start_url=get_platform(platform).search_video_url(keyword),
         )
         self.last_budget_usage = dict(result.budget_usage)
         self.last_exhaustion_reason = result.exhaustion_reason
