@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_RUNNING = "running"
+JOB_STATUS_WAITING_DECISION = "waiting_decision"
 JOB_STATUS_SUCCEEDED = "succeeded"
 JOB_STATUS_PARTIAL_FAILED = "partial_failed"
 JOB_STATUS_FAILED = "failed"
@@ -17,6 +18,7 @@ JOB_STATUSES = frozenset(
     {
         JOB_STATUS_QUEUED,
         JOB_STATUS_RUNNING,
+        JOB_STATUS_WAITING_DECISION,
         JOB_STATUS_SUCCEEDED,
         JOB_STATUS_PARTIAL_FAILED,
         JOB_STATUS_FAILED,
@@ -37,6 +39,7 @@ TERMINAL_JOB_STATUSES = frozenset(
 
 STAGE_STATUS_PENDING = "pending"
 STAGE_STATUS_RUNNING = "running"
+STAGE_STATUS_WAITING_DECISION = "waiting_decision"
 STAGE_STATUS_SUCCEEDED = "succeeded"
 STAGE_STATUS_FAILED = "failed"
 STAGE_STATUS_SKIPPED = "skipped"
@@ -46,6 +49,7 @@ STAGE_STATUSES = frozenset(
     {
         STAGE_STATUS_PENDING,
         STAGE_STATUS_RUNNING,
+        STAGE_STATUS_WAITING_DECISION,
         STAGE_STATUS_SUCCEEDED,
         STAGE_STATUS_FAILED,
         STAGE_STATUS_SKIPPED,
@@ -219,10 +223,18 @@ JOB_STATUS_TRANSITIONS: Mapping[str, frozenset[str]] = {
     ),
     JOB_STATUS_RUNNING: frozenset(
         {
+            JOB_STATUS_WAITING_DECISION,
             JOB_STATUS_SUCCEEDED,
             JOB_STATUS_PARTIAL_FAILED,
             JOB_STATUS_FAILED,
             JOB_STATUS_CANCELLING,
+            JOB_STATUS_INTERRUPTED,
+        }
+    ),
+    JOB_STATUS_WAITING_DECISION: frozenset(
+        {
+            JOB_STATUS_RUNNING,
+            JOB_STATUS_CANCELLED,
             JOB_STATUS_INTERRUPTED,
         }
     ),
@@ -244,7 +256,16 @@ STAGE_STATUS_TRANSITIONS: Mapping[str, frozenset[str]] = {
             STAGE_STATUS_CANCELLED,
         }
     ),
-    STAGE_STATUS_RUNNING: frozenset(TERMINAL_STAGE_STATUSES),
+    STAGE_STATUS_RUNNING: frozenset(
+        TERMINAL_STAGE_STATUSES | {STAGE_STATUS_WAITING_DECISION}
+    ),
+    STAGE_STATUS_WAITING_DECISION: frozenset(
+        {
+            STAGE_STATUS_RUNNING,
+            STAGE_STATUS_FAILED,
+            STAGE_STATUS_CANCELLED,
+        }
+    ),
     STAGE_STATUS_FAILED: frozenset({STAGE_STATUS_RUNNING}),
     STAGE_STATUS_SUCCEEDED: frozenset(),
     STAGE_STATUS_SKIPPED: frozenset(),

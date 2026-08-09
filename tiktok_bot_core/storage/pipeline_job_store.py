@@ -9,8 +9,10 @@ from typing import Any, Iterable
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from tiktok_bot_core.models.entities import (
+    PipelineDecisionCheckpoint,
     PipelineJob,
     PipelineJobStage,
     PipelineJobUser,
@@ -26,6 +28,7 @@ from tiktok_bot_core.models.pipeline_states import (
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
+    JOB_STATUS_WAITING_DECISION,
     KNOWN_PIPELINE_STAGES,
     STAGE_STATUSES,
     STAGE_STATUS_CANCELLED,
@@ -34,6 +37,7 @@ from tiktok_bot_core.models.pipeline_states import (
     STAGE_STATUS_RUNNING,
     STAGE_STATUS_SKIPPED,
     STAGE_STATUS_SUCCEEDED,
+    STAGE_STATUS_WAITING_DECISION,
     TERMINAL_JOB_STATUSES,
     TERMINAL_STAGE_STATUSES,
     QUALIFICATION_STATUS_MANUAL_REVIEW,
@@ -235,6 +239,10 @@ class PipelineJobStore:
         **timestamps: Any,
     ) -> bool:
         validate_job_status(status)
+        if status == JOB_STATUS_WAITING_DECISION:
+            raise ValueError(
+                "Use pause_for_decision to enter decision waiting"
+            )
 
         allowed_updates = {
             "account_id",
@@ -260,6 +268,14 @@ class PipelineJobStore:
             expected = set(expected_statuses)
             if not expected:
                 return False
+
+        if (
+            status == JOB_STATUS_RUNNING
+            and JOB_STATUS_WAITING_DECISION in expected
+        ):
+            raise ValueError(
+                "Use resume_from_decision to leave decision waiting"
+            )
 
         for current_status in expected:
             validate_job_transition(current_status, status)
@@ -384,6 +400,228 @@ class PipelineJobStore:
         session.flush()
         session.expire_all()
         return session.get(PipelineJobStage, stage_id)
+
+    def pause_for_decision(
+        self,
+        session: Session,
+        job_id: str,
+        stage: str,
+    ) -> bool:
+        """Atomically move the current running Job and Stage into waiting."""
+
+        validate_pipeline_stage(stage)
+        validate_job_transition(
+            JOB_STATUS_RUNNING,
+            JOB_STATUS_WAITING_DECISION,
+        )
+        validate_stage_transition(
+            STAGE_STATUS_RUNNING,
+            STAGE_STATUS_WAITING_DECISION,
+        )
+        return self._transition_decision_state(
+            session,
+            job_id=job_id,
+            stage=stage,
+            current_job_status=JOB_STATUS_RUNNING,
+            target_job_status=JOB_STATUS_WAITING_DECISION,
+            current_stage_status=STAGE_STATUS_RUNNING,
+            target_stage_status=STAGE_STATUS_WAITING_DECISION,
+        )
+
+    def resume_from_decision(
+        self,
+        session: Session,
+        job_id: str,
+        stage: str,
+    ) -> bool:
+        """Atomically resume the Job and Stage after a committed resolution."""
+
+        validate_pipeline_stage(stage)
+        validate_job_transition(
+            JOB_STATUS_WAITING_DECISION,
+            JOB_STATUS_RUNNING,
+        )
+        validate_stage_transition(
+            STAGE_STATUS_WAITING_DECISION,
+            STAGE_STATUS_RUNNING,
+        )
+        return self._transition_decision_state(
+            session,
+            job_id=job_id,
+            stage=stage,
+            current_job_status=JOB_STATUS_WAITING_DECISION,
+            target_job_status=JOB_STATUS_RUNNING,
+            current_stage_status=STAGE_STATUS_WAITING_DECISION,
+            target_stage_status=STAGE_STATUS_RUNNING,
+        )
+
+    @staticmethod
+    def _transition_decision_state(
+        session: Session,
+        *,
+        job_id: str,
+        stage: str,
+        current_job_status: str,
+        target_job_status: str,
+        current_stage_status: str,
+        target_stage_status: str,
+    ) -> bool:
+        """Apply a two-row CAS without leaving either entity half-transitioned."""
+
+        now = datetime.utcnow()
+        with session.no_autoflush:
+            savepoint = session.connection().begin_nested()
+            try:
+                updated_job_id = session.execute(
+                    update(PipelineJob)
+                    .where(
+                        PipelineJob.id == job_id,
+                        PipelineJob.status == current_job_status,
+                        PipelineJob.current_stage == stage,
+                    )
+                    .values(status=target_job_status, updated_at=now)
+                    .returning(PipelineJob.id)
+                    .execution_options(synchronize_session=False)
+                ).scalar_one_or_none()
+                if updated_job_id is None:
+                    savepoint.rollback()
+                    return False
+                updated_stage_id = session.execute(
+                    update(PipelineJobStage)
+                    .where(
+                        PipelineJobStage.job_id == job_id,
+                        PipelineJobStage.stage == stage,
+                        PipelineJobStage.status == current_stage_status,
+                    )
+                    .values(status=target_stage_status)
+                    .returning(PipelineJobStage.id)
+                    .execution_options(synchronize_session=False)
+                ).scalar_one_or_none()
+                if updated_stage_id is None:
+                    savepoint.rollback()
+                    return False
+                savepoint.commit()
+                PipelineJobStore._sync_decision_identities(
+                    session,
+                    job_id=job_id,
+                    stage_id=updated_stage_id,
+                    job_values={
+                        "status": target_job_status,
+                        "updated_at": now,
+                    },
+                    stage_values={"status": target_stage_status},
+                )
+                return True
+            except Exception:
+                if savepoint.is_active:
+                    savepoint.rollback()
+                raise
+
+    def interrupt_waiting_decision(
+        self,
+        session: Session,
+        job_id: str,
+        stage: str,
+    ) -> bool:
+        """Fail one unrecoverable gate without touching any other Job."""
+
+        validate_pipeline_stage(stage)
+        validate_job_transition(
+            JOB_STATUS_WAITING_DECISION,
+            JOB_STATUS_INTERRUPTED,
+        )
+        validate_stage_transition(
+            STAGE_STATUS_WAITING_DECISION,
+            STAGE_STATUS_FAILED,
+        )
+        now = datetime.utcnow()
+        with session.no_autoflush:
+            savepoint = session.connection().begin_nested()
+            try:
+                updated_job_id = session.execute(
+                    update(PipelineJob)
+                    .where(
+                        PipelineJob.id == job_id,
+                        PipelineJob.status == JOB_STATUS_WAITING_DECISION,
+                        PipelineJob.current_stage == stage,
+                    )
+                    .values(
+                        status=JOB_STATUS_INTERRUPTED,
+                        error_summary="decision gate interrupted",
+                        finished_at=now,
+                        updated_at=now,
+                    )
+                    .returning(PipelineJob.id)
+                    .execution_options(synchronize_session=False)
+                ).scalar_one_or_none()
+                if updated_job_id is None:
+                    savepoint.rollback()
+                    return False
+                updated_stage_id = session.execute(
+                    update(PipelineJobStage)
+                    .where(
+                        PipelineJobStage.job_id == job_id,
+                        PipelineJobStage.stage == stage,
+                        PipelineJobStage.status
+                        == STAGE_STATUS_WAITING_DECISION,
+                    )
+                    .values(
+                        status=STAGE_STATUS_FAILED,
+                        error_message="decision gate interrupted",
+                        finished_at=now,
+                    )
+                    .returning(PipelineJobStage.id)
+                    .execution_options(synchronize_session=False)
+                ).scalar_one_or_none()
+                if updated_stage_id is None:
+                    savepoint.rollback()
+                    return False
+                savepoint.commit()
+                self._sync_decision_identities(
+                    session,
+                    job_id=job_id,
+                    stage_id=updated_stage_id,
+                    job_values={
+                        "status": JOB_STATUS_INTERRUPTED,
+                        "error_summary": "decision gate interrupted",
+                        "finished_at": now,
+                        "updated_at": now,
+                    },
+                    stage_values={
+                        "status": STAGE_STATUS_FAILED,
+                        "error_message": "decision gate interrupted",
+                        "finished_at": now,
+                    },
+                )
+                return True
+            except Exception:
+                if savepoint.is_active:
+                    savepoint.rollback()
+                raise
+
+    @staticmethod
+    def _sync_decision_identities(
+        session: Session,
+        *,
+        job_id: str,
+        stage_id: int,
+        job_values: dict[str, Any],
+        stage_values: dict[str, Any],
+    ) -> None:
+        """Synchronize only already-loaded target identities after CAS."""
+
+        job = session.identity_map.get(
+            session.identity_key(PipelineJob, (job_id,))
+        )
+        if job is not None:
+            for field, value in job_values.items():
+                set_committed_value(job, field, value)
+        stage = session.identity_map.get(
+            session.identity_key(PipelineJobStage, (stage_id,))
+        )
+        if stage is not None:
+            for field, value in stage_values.items():
+                set_committed_value(stage, field, value)
 
     def link_user(
         self,
@@ -624,6 +862,52 @@ class PipelineJobStore:
         if self.set_job_status(
             session,
             job_id,
+            JOB_STATUS_CANCELLED,
+            expected_statuses={JOB_STATUS_WAITING_DECISION},
+            finished_at=now,
+        ):
+            validate_stage_transition(
+                STAGE_STATUS_WAITING_DECISION,
+                STAGE_STATUS_CANCELLED,
+            )
+            validate_stage_transition(
+                STAGE_STATUS_PENDING,
+                STAGE_STATUS_CANCELLED,
+            )
+            session.execute(
+                update(PipelineJobStage)
+                .where(
+                    PipelineJobStage.job_id == job_id,
+                    PipelineJobStage.status.in_(
+                        {
+                            STAGE_STATUS_WAITING_DECISION,
+                            STAGE_STATUS_PENDING,
+                        }
+                    ),
+                )
+                .values(
+                    status=STAGE_STATUS_CANCELLED,
+                    finished_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            from tiktok_bot_core.storage.pipeline_live_store import (
+                PipelineLiveStore,
+            )
+
+            PipelineLiveStore().cancel_checkpoint(
+                session,
+                job_id=job_id,
+                reason="job_cancelled",
+                resolved_at=now,
+            )
+            session.flush()
+            session.expire_all()
+            return session.get(PipelineJob, job_id)
+
+        if self.set_job_status(
+            session,
+            job_id,
             JOB_STATUS_CANCELLING,
             expected_statuses={JOB_STATUS_RUNNING},
         ):
@@ -664,19 +948,36 @@ class PipelineJobStore:
 
     def recover_interrupted(self, session: Session) -> int:
         validate_stage_transition(STAGE_STATUS_RUNNING, STAGE_STATUS_FAILED)
+        validate_stage_transition(
+            STAGE_STATUS_WAITING_DECISION,
+            STAGE_STATUS_FAILED,
+        )
         validate_job_transition(JOB_STATUS_RUNNING, JOB_STATUS_INTERRUPTED)
         validate_job_transition(JOB_STATUS_CANCELLING, JOB_STATUS_INTERRUPTED)
+        validate_job_transition(
+            JOB_STATUS_WAITING_DECISION,
+            JOB_STATUS_INTERRUPTED,
+        )
         now = datetime.utcnow()
         recoverable_job_ids = select(PipelineJob.id).where(
             PipelineJob.status.in_(
-                {JOB_STATUS_RUNNING, JOB_STATUS_CANCELLING}
+                {
+                    JOB_STATUS_RUNNING,
+                    JOB_STATUS_CANCELLING,
+                    JOB_STATUS_WAITING_DECISION,
+                }
             )
         )
         session.execute(
             update(PipelineJobStage)
             .where(
                 PipelineJobStage.job_id.in_(recoverable_job_ids),
-                PipelineJobStage.status == STAGE_STATUS_RUNNING,
+                PipelineJobStage.status.in_(
+                    {
+                        STAGE_STATUS_RUNNING,
+                        STAGE_STATUS_WAITING_DECISION,
+                    }
+                ),
             )
             .values(
                 status=STAGE_STATUS_FAILED,
@@ -685,11 +986,32 @@ class PipelineJobStore:
             )
             .execution_options(synchronize_session=False)
         )
+        session.execute(
+            update(PipelineDecisionCheckpoint)
+            .where(
+                PipelineDecisionCheckpoint.job_id.in_(recoverable_job_ids),
+                PipelineDecisionCheckpoint.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                resolved_at=now,
+                resolution_key=None,
+                resolution_source="system",
+                operator="",
+                reason="service_interrupted",
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
         statement = (
             update(PipelineJob)
             .where(
                 PipelineJob.status.in_(
-                    {JOB_STATUS_RUNNING, JOB_STATUS_CANCELLING}
+                    {
+                        JOB_STATUS_RUNNING,
+                        JOB_STATUS_CANCELLING,
+                        JOB_STATUS_WAITING_DECISION,
+                    }
                 )
             )
             .values(

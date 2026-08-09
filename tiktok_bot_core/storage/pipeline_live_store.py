@@ -8,10 +8,11 @@ import math
 import re
 from types import MappingProxyType
 import unicodedata
+import uuid
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
@@ -799,8 +800,9 @@ class PipelineLiveStore:
         normalized_job_id = str(job_id or "").strip()
         if not normalized_job_id:
             raise PipelineLiveValidationError("job_id must not be empty")
-        if session.get(PipelineJob, normalized_job_id) is None:
-            raise PipelineLiveValidationError("pipeline job not found")
+        with session.no_autoflush:
+            if session.get(PipelineJob, normalized_job_id) is None:
+                raise PipelineLiveValidationError("pipeline job not found")
         normalized_stage = _clean_code(stage, field="stage", maximum=20)
         normalized_kind = _clean_code(
             kind,
@@ -835,27 +837,53 @@ class PipelineLiveStore:
             raise PipelineLiveValidationError(
                 "checkpoint default option is not registered"
             )
-        checkpoint = PipelineDecisionCheckpoint(
-            job_id=normalized_job_id,
-            stage=normalized_stage,
-            kind=normalized_kind,
-            version=normalized_version,
-            option_keys_json=normalized_options,
-            default_option_key=normalized_default,
-            context_json=_validate_context(context),
-            status="pending",
-            deadline_at=deadline_at,
-        )
+        safe_context = _validate_context(context)
+        checkpoint_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        connection = session.connection()
+        savepoint = connection.begin_nested()
         try:
-            with session.begin_nested():
-                session.add(checkpoint)
-                session.flush()
+            connection.execute(
+                insert(PipelineDecisionCheckpoint).values(
+                    id=checkpoint_id,
+                    job_id=normalized_job_id,
+                    stage=normalized_stage,
+                    kind=normalized_kind,
+                    version=normalized_version,
+                    option_keys_json=normalized_options,
+                    default_option_key=normalized_default,
+                    context_json=safe_context,
+                    status="pending",
+                    deadline_at=deadline_at,
+                    resolved_at=None,
+                    resolution_key=None,
+                    resolution_source=None,
+                    operator="",
+                    reason="",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            savepoint.commit()
         except IntegrityError as exc:
+            if savepoint.is_active:
+                savepoint.rollback()
             if _is_pending_checkpoint_conflict(exc):
                 raise CheckpointConflictError(
                     "an active checkpoint already exists"
                 ) from None
             raise
+        except Exception:
+            if savepoint.is_active:
+                savepoint.rollback()
+            raise
+        with session.no_autoflush:
+            checkpoint = session.get(
+                PipelineDecisionCheckpoint,
+                checkpoint_id,
+            )
+        if checkpoint is None:
+            raise RuntimeError("created checkpoint could not be loaded")
         return checkpoint
 
     def get_active_checkpoint(

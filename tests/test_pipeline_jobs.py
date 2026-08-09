@@ -653,6 +653,367 @@ def test_recover_running_jobs_marks_interrupted(db):
         assert cancelling.stages[0].finished_at is not None
 
 
+def test_waiting_decision_state_transitions_are_strict():
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_RUNNING,
+        JOB_STATUS_SUCCEEDED,
+        JOB_STATUS_WAITING_DECISION,
+        STAGE_STATUS_CANCELLED,
+        STAGE_STATUS_FAILED,
+        STAGE_STATUS_RUNNING,
+        STAGE_STATUS_SUCCEEDED,
+        STAGE_STATUS_WAITING_DECISION,
+        validate_job_transition,
+        validate_stage_transition,
+    )
+
+    assert validate_job_transition(
+        JOB_STATUS_RUNNING,
+        JOB_STATUS_WAITING_DECISION,
+    )
+    assert validate_job_transition(
+        JOB_STATUS_WAITING_DECISION,
+        JOB_STATUS_RUNNING,
+    )
+    assert validate_job_transition(
+        JOB_STATUS_WAITING_DECISION,
+        JOB_STATUS_CANCELLED,
+    )
+    assert validate_stage_transition(
+        STAGE_STATUS_RUNNING,
+        STAGE_STATUS_WAITING_DECISION,
+    )
+    assert validate_stage_transition(
+        STAGE_STATUS_WAITING_DECISION,
+        STAGE_STATUS_RUNNING,
+    )
+    assert validate_stage_transition(
+        STAGE_STATUS_WAITING_DECISION,
+        STAGE_STATUS_CANCELLED,
+    )
+    assert validate_stage_transition(
+        STAGE_STATUS_WAITING_DECISION,
+        STAGE_STATUS_FAILED,
+    )
+    with pytest.raises(ValueError, match="Invalid pipeline job transition"):
+        validate_job_transition(
+            JOB_STATUS_SUCCEEDED,
+            JOB_STATUS_WAITING_DECISION,
+        )
+    with pytest.raises(ValueError, match="Invalid pipeline stage transition"):
+        validate_stage_transition(
+            STAGE_STATUS_WAITING_DECISION,
+            STAGE_STATUS_SUCCEEDED,
+        )
+
+
+def test_store_pauses_and_resumes_job_and_stage_as_one_cas(db):
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_RUNNING,
+        JOB_STATUS_WAITING_DECISION,
+        STAGE_STATUS_RUNNING,
+        STAGE_STATUS_SUCCEEDED,
+        STAGE_STATUS_WAITING_DECISION,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    store = PipelineJobStore()
+    with db.session() as session:
+        job = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        )
+        claimed = store.claim_next_job(session, platforms={"douyin"})
+        assert claimed is not None and claimed.id == job.id
+        assert store.start_stage(session, job.id, "collect") is not None
+
+        assert store.pause_for_decision(session, job.id, "collect") is True
+        assert store.pause_for_decision(session, job.id, "collect") is False
+        session.refresh(job)
+        session.refresh(job.stages[0])
+        assert job.status == JOB_STATUS_WAITING_DECISION
+        assert job.stages[0].status == STAGE_STATUS_WAITING_DECISION
+        assert store.finish_stage(
+            session,
+            job.id,
+            "collect",
+            STAGE_STATUS_SUCCEEDED,
+        ) is None
+
+        assert store.resume_from_decision(session, job.id, "collect") is True
+        assert store.resume_from_decision(session, job.id, "collect") is False
+        session.refresh(job)
+        session.refresh(job.stages[0])
+        assert job.status == JOB_STATUS_RUNNING
+        assert job.stages[0].status == STAGE_STATUS_RUNNING
+
+
+def test_generic_status_setter_cannot_enter_or_resume_decision_waiting(db):
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_QUEUED,
+        JOB_STATUS_RUNNING,
+        JOB_STATUS_WAITING_DECISION,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    store = PipelineJobStore()
+    with db.session() as session:
+        job = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        )
+        assert store.set_job_status(
+            session,
+            job.id,
+            JOB_STATUS_RUNNING,
+            expected_statuses={JOB_STATUS_QUEUED},
+        )
+        assert store.start_stage(session, job.id, "collect") is not None
+
+        with pytest.raises(ValueError, match="pause_for_decision"):
+            store.set_job_status(
+                session,
+                job.id,
+                JOB_STATUS_WAITING_DECISION,
+                expected_statuses={JOB_STATUS_RUNNING},
+            )
+        assert store.pause_for_decision(session, job.id, "collect")
+        with pytest.raises(ValueError, match="resume_from_decision"):
+            store.set_job_status(
+                session,
+                job.id,
+                JOB_STATUS_RUNNING,
+                expected_statuses={JOB_STATUS_WAITING_DECISION},
+            )
+        with pytest.raises(ValueError, match="resume_from_decision"):
+            store.set_job_status(
+                session,
+                job.id,
+                JOB_STATUS_RUNNING,
+            )
+
+
+def test_pause_savepoint_rolls_back_job_when_stage_cas_misses(db):
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_RUNNING,
+        STAGE_STATUS_FAILED,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    store = PipelineJobStore()
+    with db.session() as session:
+        job = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        )
+        claimed = store.claim_next_job(session, platforms={"douyin"})
+        assert claimed is not None and claimed.id == job.id
+        assert store.start_stage(session, job.id, "collect") is not None
+        assert store.finish_stage(
+            session,
+            job.id,
+            "collect",
+            STAGE_STATUS_FAILED,
+            error="injected stage mismatch",
+        ) is not None
+
+        assert store.pause_for_decision(session, job.id, "collect") is False
+
+        session.refresh(job)
+        session.refresh(job.stages[0])
+        assert job.status == JOB_STATUS_RUNNING
+        assert job.stages[0].status == STAGE_STATUS_FAILED
+
+
+def test_pause_resume_sync_only_loaded_target_identities(db):
+    from tiktok_bot_core.models.entities import PipelineJobEvent
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_RUNNING,
+        JOB_STATUS_WAITING_DECISION,
+        STAGE_STATUS_RUNNING,
+        STAGE_STATUS_WAITING_DECISION,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    store = PipelineJobStore()
+    session = db.SessionLocal()
+    try:
+        target = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        )
+        session.commit()
+        claimed = store.claim_next_job(session, platforms={"douyin"})
+        assert claimed is not None and claimed.id == target.id
+        assert store.start_stage(session, target.id, "collect") is not None
+        session.commit()
+
+        target = store.get_job(session, target.id)
+        assert target is not None
+        target_stage = target.stages[0]
+        unrelated = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["filter"],
+        )
+        session.commit()
+        target.status
+        target_stage.status
+        session.refresh(unrelated)
+        unrelated.error_summary = "unrelated dirty value"
+        invalid_unflushed = PipelineJobEvent(
+            job_id=target.id,
+            stage="collect",
+            event_type=None,
+            level="info",
+            payload_json={},
+        )
+        session.add(invalid_unflushed)
+
+        assert store.pause_for_decision(
+            session,
+            target.id,
+            "collect",
+        )
+        assert target.status == JOB_STATUS_WAITING_DECISION
+        assert target_stage.status == STAGE_STATUS_WAITING_DECISION
+        assert invalid_unflushed in session.new
+        assert unrelated in session.dirty
+        assert inspect(unrelated).expired is False
+        assert unrelated.error_summary == "unrelated dirty value"
+
+        assert store.resume_from_decision(
+            session,
+            target.id,
+            "collect",
+        )
+        assert target.status == JOB_STATUS_RUNNING
+        assert target_stage.status == STAGE_STATUS_RUNNING
+        assert invalid_unflushed in session.new
+        assert unrelated in session.dirty
+        assert inspect(unrelated).expired is False
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cancelling_waiting_job_closes_checkpoint_and_finishes_states(db):
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_CANCELLED,
+        STAGE_STATUS_CANCELLED,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+    from tiktok_bot_core.storage.pipeline_live_store import PipelineLiveStore
+
+    store = PipelineJobStore()
+    live_store = PipelineLiveStore()
+    with db.session() as session:
+        job = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect", "filter"],
+        )
+        claimed = store.claim_next_job(session, platforms={"douyin"})
+        assert claimed is not None and claimed.id == job.id
+        assert store.start_stage(session, job.id, "collect") is not None
+        checkpoint = live_store.create_checkpoint(
+            session,
+            job_id=job.id,
+            stage="collect",
+            kind="insufficient_evidence",
+            option_keys=["continue_with_current_evidence", "cancel_job"],
+            default_option_key="continue_with_current_evidence",
+            context={"schemaVersion": 1, "summary": "review evidence"},
+            deadline_at=datetime.utcnow() + timedelta(seconds=10),
+        )
+        assert store.pause_for_decision(session, job.id, "collect")
+
+        cancelled = store.request_cancel(session, job.id)
+
+        assert cancelled is not None
+        assert cancelled.status == JOB_STATUS_CANCELLED
+        assert cancelled.finished_at is not None
+        assert {stage.status for stage in cancelled.stages} == {
+            STAGE_STATUS_CANCELLED
+        }
+        authoritative = live_store.get_checkpoint(
+            session,
+            job_id=job.id,
+            checkpoint_id=checkpoint.id,
+        )
+        assert authoritative is not None
+        assert authoritative.status == "cancelled"
+        assert authoritative.resolution_source == "system"
+        assert live_store.get_active_checkpoint(session, job_id=job.id) is None
+
+
+def test_recover_waiting_decision_marks_interrupted_and_closes_checkpoint(db):
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_INTERRUPTED,
+        STAGE_STATUS_FAILED,
+    )
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+    from tiktok_bot_core.storage.pipeline_live_store import PipelineLiveStore
+
+    store = PipelineJobStore()
+    live_store = PipelineLiveStore()
+    with db.session() as session:
+        job = store.create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        )
+        claimed = store.claim_next_job(session, platforms={"douyin"})
+        assert claimed is not None and claimed.id == job.id
+        assert store.start_stage(session, job.id, "collect") is not None
+        checkpoint = live_store.create_checkpoint(
+            session,
+            job_id=job.id,
+            stage="collect",
+            kind="insufficient_evidence",
+            option_keys=["continue_with_current_evidence"],
+            default_option_key="continue_with_current_evidence",
+            context={"schemaVersion": 1, "summary": "review evidence"},
+            deadline_at=datetime.utcnow() + timedelta(seconds=10),
+        )
+        assert store.pause_for_decision(session, job.id, "collect")
+
+        assert store.recover_interrupted(session) == 1
+
+        session.refresh(job)
+        session.refresh(job.stages[0])
+        assert job.status == JOB_STATUS_INTERRUPTED
+        assert job.stages[0].status == STAGE_STATUS_FAILED
+        assert job.stages[0].error_message == "service interrupted"
+        authoritative = live_store.get_checkpoint(
+            session,
+            job_id=job.id,
+            checkpoint_id=checkpoint.id,
+        )
+        assert authoritative is not None
+        assert authoritative.status == "cancelled"
+        assert authoritative.resolution_source == "system"
+
+
 def test_pipeline_status_defaults_come_from_shared_state_module(db):
     from tiktok_bot_core.models import pipeline_states
     from tiktok_bot_core.models.entities import PipelineJob, PipelineJobStage

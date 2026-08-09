@@ -803,6 +803,40 @@ def test_non_pending_unique_integrity_error_is_not_misreported_as_conflict(db):
             )
 
 
+def test_create_checkpoint_does_not_flush_unrelated_invalid_pending_entity(db):
+    store = PipelineLiveStore()
+    job_id, _ = _seed_jobs(db)
+    session = db.SessionLocal()
+    try:
+        invalid_unflushed = PipelineJobEvent(
+            job_id=job_id,
+            stage="collect",
+            event_type=None,
+            level="info",
+            payload_json={},
+        )
+        session.add(invalid_unflushed)
+
+        checkpoint = store.create_checkpoint(
+            session,
+            job_id=job_id,
+            stage="filter",
+            kind="qualification_review",
+            option_keys=["continue_with_qualified_only"],
+            default_option_key="continue_with_qualified_only",
+            context={"schemaVersion": 1, "summary": "review"},
+            deadline_at=datetime.utcnow() + timedelta(seconds=10),
+        )
+
+        assert checkpoint.id
+        assert checkpoint.status == "pending"
+        assert invalid_unflushed.sequence is None
+        assert invalid_unflushed in session.new
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_init_adds_live_tables_and_pending_index_without_losing_old_job(tmp_path):
     database = Database(f"sqlite:///{tmp_path / 'legacy-pipeline.db'}")
     with database.engine.begin() as connection:

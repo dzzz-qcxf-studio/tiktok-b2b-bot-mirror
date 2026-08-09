@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-09（Hermes 持久化 Job 事件底座）
+> 最后更新: 2026-08-09（Hermes 服务端决策状态基础）
 
 ## 单一任务入口
 
@@ -105,9 +105,30 @@ Authorization、浏览器 Profile、Prompt/Response 和未知字段不能落库�
 不消耗高频预算，也不改变 Pipeline 业务结果。Job 终态成功提交后清理对应内存缓存，后续读取
 仍从数据库恢复权威 watermark。
 
-本 Gate 只交付模型、Store、Recorder 和并发/旧库兼容测试。Runner 尚未向该 Store 写入真实
-Job 事件，`waiting_decision` 状态、10 秒默认、受认证实时 API 和 Web 作战窗口仍属于后续
-H4-B—H4-D，当前页面行为不应被描述为已经支持互动关卡。
+在 H4-A 提交点只交付了模型、Store、Recorder 和并发/旧库兼容测试；当时 Runner 尚未向该
+Store 写入真实 Job 事件，`waiting_decision`、10 秒默认、受认证实时 API 和 Web 作战窗口均未
+完成。下面按后续小步记录新增能力，当前页面仍不应被描述为已经支持互动关卡。
+
+### H4-B 服务端决策状态基础
+
+Job 与 Stage 增加 `waiting_decision`，只能通过专用双实体 CAS 在
+`running ↔ waiting_decision` 间迁移。通用 `set_job_status()` 明确拒绝进入等待或从等待恢复，
+避免调用方只更新 Job 而留下 Stage 状态不一致。专用迁移使用 savepoint 和定向 identity 同步，
+失败时整体回滚且不 flush/expire Session 中无关实体。
+
+`DecisionGateService` 使用固定、不可变的关卡定义注册表。普通关卡默认由服务端记录 10 秒
+deadline；页面是否打开不影响人工/timeout 对同一 checkpoint 的 CAS。最后一秒竞争只有一个
+resolution 获胜，迟到调用返回同一权威结果。普通超时只选择已注册默认项，服务没有任何写入
+候选 `qualified/rejected` 的路径。
+
+等待状态取消会在同一事务中取消 active checkpoint，并把 Job、当前 Stage 与尚未开始的 Stage
+结束为 cancelled；服务启动恢复把遗留 waiting Job 变为 interrupted，并关闭 pending
+checkpoint。等待协程被取消或 clock/sleeper/数据库发生异常时，Gate 先幂等取消 checkpoint 并
+恢复运行；恢复失败则只把当前 Job/Stage 降级为 interrupted/failed，不能永久遗留 waiting。
+关闭事件循环上的陈旧 waiter 会被逐个剔除，不会让已经提交的 resolve/cancel 对外误报失败。
+
+本小步尚未把 Gate 接入 collect/filter/outreach，也没有新增 API 或前端交互。当前真实 Pipeline
+仍按原阶段流程运行；具体何时创建关卡、默认选项怎样影响后续阶段，属于 H4-B 下一小步。
 
 ## 阶段执行流程
 
