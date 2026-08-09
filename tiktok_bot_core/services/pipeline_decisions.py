@@ -39,6 +39,7 @@ _CONTEXT_FIELDS = frozenset(
         "remainingBudget",
         "defaultReason",
         "blockingReason",
+        "manualSession",
     }
 )
 
@@ -80,6 +81,7 @@ class CheckpointDefinition:
     option_keys: tuple[str, ...]
     default_option_key: str
     context_builder: ContextBuilder
+    auto_timeout: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,7 @@ class DecisionResolution:
     source: str
     status: str
     resolved_at: datetime | None
+    deadline_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,12 +127,15 @@ def _definition(
     kind: str,
     options: tuple[str, ...],
     default: str,
+    *,
+    auto_timeout: bool = True,
 ) -> CheckpointDefinition:
     return CheckpointDefinition(
         kind=kind,
         option_keys=options,
         default_option_key=default,
         context_builder=_safe_context,
+        auto_timeout=auto_timeout,
     )
 
 
@@ -172,6 +178,12 @@ CHECKPOINT_DEFINITIONS: Mapping[str, CheckpointDefinition] = MappingProxyType(
             "account_blocked",
             ("open_account_recovery", "skip_stage", "stop_job"),
             "skip_stage",
+        ),
+        "manual_review_session": _definition(
+            "manual_review_session",
+            ("review_complete",),
+            "review_complete",
+            auto_timeout=False,
         ),
     }
 )
@@ -279,7 +291,52 @@ class DecisionGateService:
             source=checkpoint.resolution_source or "system",
             status=checkpoint.status,
             resolved_at=checkpoint.resolved_at,
+            deadline_at=(
+                None
+                if checkpoint.kind == "manual_review_session"
+                else checkpoint.deadline_at
+            ),
         )
+
+    @staticmethod
+    def _option_subset(
+        definition: CheckpointDefinition,
+        option_keys: tuple[str, ...] | list[str] | None,
+        default_option_key: str | None,
+    ) -> tuple[tuple[str, ...], str]:
+        if option_keys is None:
+            normalized_options = definition.option_keys
+        elif isinstance(option_keys, (tuple, list)):
+            normalized_options = tuple(option_keys)
+        else:
+            raise DecisionGateValidationError(
+                "decision options must be a registered subset"
+            )
+        if (
+            not normalized_options
+            or len(set(normalized_options)) != len(normalized_options)
+            or any(
+                not isinstance(option, str)
+                or option not in definition.option_keys
+                for option in normalized_options
+            )
+        ):
+            raise DecisionGateValidationError(
+                "decision options must be a registered subset"
+            )
+        normalized_default = (
+            definition.default_option_key
+            if default_option_key is None
+            else default_option_key
+        )
+        if (
+            not isinstance(normalized_default, str)
+            or normalized_default not in normalized_options
+        ):
+            raise DecisionGateValidationError(
+                "decision default must be in the registered subset"
+            )
+        return normalized_options, normalized_default
 
     def get_resolution(
         self,
@@ -374,7 +431,11 @@ class DecisionGateService:
                 raise DecisionGateConflictError(
                     authoritative=authoritative
                 )
-            if self._clock() >= checkpoint.deadline_at:
+            definition = self._definition(checkpoint.kind)
+            if (
+                definition.auto_timeout
+                and self._clock() >= checkpoint.deadline_at
+            ):
                 deadline_default = checkpoint.default_option_key
                 deadline_version = checkpoint.version
             else:
@@ -511,13 +572,24 @@ class DecisionGateService:
         stage: str,
         kind: str,
         context: Mapping[str, Any],
+        option_keys: tuple[str, ...] | list[str] | None = None,
+        default_option_key: str | None = None,
     ) -> DecisionResolution:
         definition = self._definition(kind)
+        selected_options, selected_default = self._option_subset(
+            definition,
+            option_keys,
+            default_option_key,
+        )
         safe_context = definition.context_builder(context)
         now = self._clock()
         if not isinstance(now, datetime):
             raise TypeError("clock must return a datetime")
-        deadline = now + timedelta(seconds=self._timeout_seconds)
+        deadline = (
+            now + timedelta(seconds=self._timeout_seconds)
+            if definition.auto_timeout
+            else datetime.max
+        )
         checkpoint_id = ""
         version = 0
         try:
@@ -527,8 +599,8 @@ class DecisionGateService:
                     job_id=job_id,
                     stage=stage,
                     kind=definition.kind,
-                    option_keys=definition.option_keys,
-                    default_option_key=definition.default_option_key,
+                    option_keys=selected_options,
+                    default_option_key=selected_default,
                     context=safe_context,
                     deadline_at=deadline,
                 )
@@ -571,14 +643,16 @@ class DecisionGateService:
                             )
                         return resolution
                     remaining = (
-                        checkpoint.deadline_at - self._clock()
-                    ).total_seconds()
-                if remaining <= 0:
+                        (checkpoint.deadline_at - self._clock()).total_seconds()
+                        if definition.auto_timeout
+                        else self._poll_interval_seconds
+                    )
+                if definition.auto_timeout and remaining <= 0:
                     try:
                         return self._resolve_once(
                             job_id=job_id,
                             checkpoint_id=checkpoint_id,
-                            option_key=definition.default_option_key,
+                            option_key=selected_default,
                             version=version,
                             source="timeout",
                             reason="deadline_elapsed",
@@ -618,6 +692,28 @@ class DecisionGateService:
             raise
         finally:
             self._unregister_waiter(job_id, waiter)
+
+    async def await_manual_review(
+        self,
+        *,
+        job_id: str,
+        stage: str,
+        context: Mapping[str, Any],
+    ) -> DecisionResolution:
+        """Wait for explicit review completion without an automatic default."""
+
+        if not isinstance(context, Mapping):
+            raise DecisionGateValidationError(
+                "decision context must be an object"
+            )
+        return await self.await_decision(
+            job_id=job_id,
+            stage=stage,
+            kind="manual_review_session",
+            option_keys=("review_complete",),
+            default_option_key="review_complete",
+            context={**dict(context), "manualSession": True},
+        )
 
 
 __all__ = [

@@ -225,6 +225,30 @@ async def test_concurrency_manager_obeys_douyin_limit():
 
 
 @pytest.mark.asyncio
+async def test_quarantined_account_does_not_consume_platform_slot_and_recovers():
+    manager = PipelineConcurrencyManager(douyin_limit=1)
+    quarantined_lease = await manager.acquire("douyin", 101)
+
+    await quarantined_lease.quarantine()
+
+    assert manager.active_count("douyin") == 0
+    assert manager.is_account_active("douyin", 101) is False
+    assert manager.is_account_quarantined("douyin", 101) is True
+    assert await manager.try_acquire("douyin", 101) is None
+
+    other_lease = await manager.try_acquire("douyin", 202)
+    assert other_lease is not None
+    await other_lease.release()
+
+    await quarantined_lease.release()
+    await quarantined_lease.release()
+    assert manager.is_account_quarantined("douyin", 101) is False
+    recovered_lease = await manager.try_acquire("douyin", 101)
+    assert recovered_lease is not None
+    await recovered_lease.release()
+
+
+@pytest.mark.asyncio
 async def test_same_account_is_never_acquired_twice():
     manager = PipelineConcurrencyManager(douyin_limit=2)
     first = await manager.acquire("douyin", account_id=7)

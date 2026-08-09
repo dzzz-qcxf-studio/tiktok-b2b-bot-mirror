@@ -35,10 +35,17 @@ from tiktok_bot_core.models.pipeline_states import (
     JOB_STATUS_SUCCEEDED,
     STAGE_STATUS_FAILED,
     STAGE_STATUS_RUNNING,
+    STAGE_STATUS_CANCELLED,
+    STAGE_STATUS_SKIPPED,
     STAGE_STATUS_SUCCEEDED,
     TERMINAL_JOB_STATUSES,
 )
 from tiktok_bot_core.services.pipeline import PipelineRunContext, PipelineService
+from tiktok_bot_core.services.pipeline_decision_policy import (
+    DecisionPlan,
+    PipelineDecisionPolicy,
+)
+from tiktok_bot_core.services.pipeline_decisions import DecisionGateService
 from tiktok_bot_core.services.pipeline_concurrency import (
     ConcurrencyLease,
     PipelineConcurrencyManager,
@@ -60,6 +67,10 @@ class PipelineJobError(RuntimeError):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
+
+
+class _RunnerCancellationRequested(RuntimeError):
+    """Internal control flow for a durable Job cancellation request."""
 
 
 class PipelineJobService:
@@ -450,12 +461,28 @@ class PipelineJobRunner:
         providers: BrowserProviderRegistry | None = None,
         concurrency: PipelineConcurrencyManager | None = None,
         pipeline_factory: Callable[[], PipelineService] = PipelineService,
+        decision_policy: PipelineDecisionPolicy | None = None,
+        decision_gate: DecisionGateService | None = None,
     ) -> None:
         self.database = database or get_db()
         self.store = store or PipelineJobStore()
         self.providers = providers or BrowserProviderRegistry()
         self.concurrency = concurrency or PipelineConcurrencyManager()
         self.pipeline_factory = pipeline_factory
+        self.decision_policy = decision_policy or PipelineDecisionPolicy(
+            self.database
+        )
+        self.decision_gate = decision_gate or DecisionGateService(
+            self.database,
+            job_store=self.store,
+        )
+        # If browser cleanup cannot be confirmed, retain both handles and the
+        # active account lease as an explicit in-process quarantine.  Opening a
+        # second browser for the same account would be less safe than keeping
+        # that account unavailable until operator recovery or process restart.
+        self._quarantined_resources: dict[
+            tuple[str, int], tuple[Any, ConcurrencyLease]
+        ] = {}
 
     async def run_job(
         self,
@@ -466,6 +493,201 @@ class PipelineJobRunner:
         owned_lease = lease
         account = None
         browser_session = None
+        context = None
+        pipeline = None
+
+        async def release_resources(*, fail_if_incomplete: bool) -> None:
+            nonlocal browser_session, owned_lease
+            cleanup_cancelled = False
+            cleanup_failed = False
+            if browser_session is not None and account is not None:
+                current_browser = browser_session
+                try:
+                    await self.providers.get(account.platform).release(
+                        current_browser
+                    )
+                except asyncio.CancelledError:
+                    cleanup_cancelled = True
+                except Exception:
+                    cleanup_failed = True
+                    logger.exception(
+                        "Failed to release browser session for job %s",
+                        job_id,
+                    )
+                if bool(getattr(current_browser, "_released", False)):
+                    browser_session = None
+                else:
+                    cleanup_failed = True
+                    logger.error(
+                        "Browser provider did not confirm session release "
+                        "for job %s",
+                        job_id,
+                    )
+            # Never make the account available while a browser session may
+            # still control it.  A later cleanup pass can retry the same
+            # session because the reference is only cleared after release is
+            # confirmed.
+            if browser_session is None and owned_lease is not None:
+                current_lease = owned_lease
+                try:
+                    await current_lease.release()
+                except asyncio.CancelledError:
+                    cleanup_cancelled = True
+                except Exception:
+                    cleanup_failed = True
+                    logger.exception(
+                        "Failed to release concurrency lease for job %s",
+                        job_id,
+                    )
+                if bool(getattr(current_lease, "_released", False)):
+                    owned_lease = None
+            if (
+                cleanup_failed
+                and not fail_if_incomplete
+                and browser_session is not None
+                and owned_lease is not None
+                and account is not None
+            ):
+                try:
+                    await owned_lease.quarantine()
+                except asyncio.CancelledError:
+                    cleanup_cancelled = True
+                except Exception:
+                    logger.exception(
+                        "Failed to quarantine account resources for job %s",
+                        job_id,
+                    )
+                platform_key = str(
+                    getattr(account.platform, "value", account.platform)
+                ).strip().lower()
+                self._quarantined_resources[
+                    (platform_key, int(account.id))
+                ] = (browser_session, owned_lease)
+            if cleanup_cancelled:
+                raise asyncio.CancelledError
+            if cleanup_failed and fail_if_incomplete:
+                raise PipelineJobError(
+                    "manual_review_release_failed",
+                    "Manual review resources could not be released",
+                )
+
+        async def reacquire_after_manual_review() -> None:
+            nonlocal account, browser_session, owned_lease, context, pipeline
+            with self.database.session() as session:
+                current_job = self.store.get_job(session, job_id)
+                if current_job is None:
+                    raise PipelineJobError(
+                        "job_not_found",
+                        "Pipeline job not found",
+                    )
+                if current_job.status != JOB_STATUS_RUNNING:
+                    raise PipelineJobError(
+                        "job_not_running",
+                        "Pipeline job cannot resume after manual review",
+                    )
+                expected_platform = current_job.platform
+                expected_account_id = current_job.account_id
+            # Reuse the exact same account/provider preflight used at Job
+            # creation: login state, platform binding, TikTok fingerprint
+            # profile, and provider availability must all still hold.
+            await PipelineJobService(
+                database=self.database,
+                store=self.store,
+                providers=self.providers,
+            ).preflight_job(
+                platform=expected_platform,
+                account_mode="specified",
+                account_id=expected_account_id,
+            )
+            refreshed_account = self._load_runnable_job_account(job_id)
+            if refreshed_account is None:
+                raise PipelineJobError(
+                    "manual_review_job_cancelled",
+                    "Pipeline job was cancelled during manual review",
+                )
+            provider = self.providers.get(refreshed_account.platform)
+            availability = await provider.check_available(refreshed_account)
+            if not availability.available:
+                raise PipelineJobError(
+                    "manual_review_resume_unavailable",
+                    "Browser provider is unavailable after manual review",
+                )
+            reacquired_lease = None
+            while reacquired_lease is None:
+                if self._is_cancelling(job_id):
+                    raise _RunnerCancellationRequested
+                reacquired_lease = await self.concurrency.try_acquire(
+                    refreshed_account.platform,
+                    refreshed_account.id,
+                )
+                if reacquired_lease is None:
+                    await asyncio.sleep(0.01)
+            if self._is_cancelling(job_id):
+                await reacquired_lease.release()
+                raise _RunnerCancellationRequested
+            try:
+                reacquired_browser = await provider.acquire(refreshed_account)
+            except asyncio.CancelledError:
+                await reacquired_lease.release()
+                raise
+            except Exception as exc:
+                await reacquired_lease.release()
+                raise PipelineJobError(
+                    "manual_review_resume_failed",
+                    "Browser session could not resume after manual review",
+                ) from exc
+            account = refreshed_account
+            owned_lease = reacquired_lease
+            browser_session = reacquired_browser
+            if self._is_cancelling(job_id):
+                raise _RunnerCancellationRequested
+            context = PipelineRunContext(
+                job_id=job_id,
+                platform=account.platform,
+                account_id=account.id,
+                account_username=account.username,
+                browser_session=browser_session,
+            )
+            # Never reuse a PipelineService that still references work done
+            # with the released BrowserSession.
+            pipeline = self.pipeline_factory()
+
+        async def await_plan(plan: DecisionPlan, stage: str) -> str:
+            resolution = await self.decision_gate.await_decision(
+                job_id=job_id,
+                stage=stage,
+                kind=plan.kind,
+                option_keys=plan.option_keys,
+                default_option_key=plan.default_option_key,
+                context=plan.context,
+            )
+            if resolution.option_key is None:
+                raise PipelineJobError(
+                    "decision_resolution_missing",
+                    "Pipeline decision did not select an action",
+                )
+            if self._is_cancelling(job_id):
+                raise _RunnerCancellationRequested
+            return str(resolution.option_key)
+
+        async def await_manual_review(stage: str) -> None:
+            await release_resources(fail_if_incomplete=True)
+            resolution = await self.decision_gate.await_manual_review(
+                job_id=job_id,
+                stage=stage,
+                context={
+                    "summary": "Complete the current candidate review session",
+                },
+            )
+            if resolution.option_key != "review_complete":
+                raise PipelineJobError(
+                    "manual_review_resolution_invalid",
+                    "Manual review did not complete safely",
+                )
+            if self._is_cancelling(job_id):
+                raise _RunnerCancellationRequested
+            await reacquire_after_manual_review()
+
         try:
             account = self._load_runnable_job_account(job_id)
             if account is None:
@@ -487,6 +709,7 @@ class PipelineJobRunner:
             )
             pipeline = self.pipeline_factory()
             failed_stages: list[str] = []
+            skip_remaining = False
 
             for stage in self._ordered_stages(job_id):
                 if self._is_cancelling(job_id):
@@ -499,30 +722,185 @@ class PipelineJobRunner:
                             f"Could not start pipeline stage: {stage}"
                         )
 
-                outcome = None
-                config = self._job_config(job_id)
-                async for item in pipeline.run(
-                    context,
-                    stages=[stage],
-                    collection_config=config.get("collection_config"),
-                    strategy_config=config.get("strategy_config"),
-                    outreach_config=config.get("outreach_config"),
-                ):
-                    outcome = item
-                if outcome is None:
-                    outcome = {
-                        "status": "error",
-                        "result": {"error": "Pipeline stage returned no result"},
-                    }
+                if stage == "outreach":
+                    outreach_action = "execute_approved_outreach"
+                    while True:
+                        outreach_plan = self.decision_policy.before_stage(
+                            job_id=job_id,
+                            stage=stage,
+                        )
+                        if outreach_plan is None:
+                            break
+                        outreach_action = await await_plan(
+                            outreach_plan,
+                            stage,
+                        )
+                        if outreach_action == "open_review_workbench":
+                            await await_manual_review(stage)
+                            # The account, qualified set, and strategy rows may
+                            # all have changed while the browser was released.
+                            continue
+                        if outreach_action == "skip_outreach":
+                            with self.database.session() as session:
+                                finished = self.store.finish_stage(
+                                    session,
+                                    job_id,
+                                    stage,
+                                    STAGE_STATUS_SKIPPED,
+                                    result={"decision": "skip_outreach"},
+                                )
+                            if finished is None:
+                                raise RuntimeError(
+                                    "Could not skip pipeline outreach stage"
+                                )
+                            break
+                        if outreach_action == "execute_approved_outreach":
+                            break
+                        raise PipelineJobError(
+                            "decision_action_unavailable",
+                            "Pipeline decision action is unavailable",
+                        )
+                    if outreach_action == "skip_outreach":
+                        continue
 
-                result = dict(outcome.get("result") or {})
-                if outcome.get("status") == "ok":
-                    stage_status = STAGE_STATUS_SUCCEEDED
-                    error = ""
-                else:
-                    stage_status = STAGE_STATUS_FAILED
-                    error = str(result.get("error") or "Pipeline stage failed")
-                    failed_stages.append(stage)
+                retry_count = 0
+                while True:
+                    if self._is_cancelling(job_id):
+                        raise _RunnerCancellationRequested
+                    outcome = None
+                    config = self._job_config(job_id)
+                    async for item in pipeline.run(
+                        context,
+                        stages=[stage],
+                        collection_config=config.get("collection_config"),
+                        strategy_config=config.get("strategy_config"),
+                        outreach_config=config.get("outreach_config"),
+                    ):
+                        outcome = item
+                    if outcome is None:
+                        outcome = {
+                            "status": "error",
+                            "result": {
+                                "errorCode": "pipeline_stage_empty",
+                                "error": "Pipeline stage returned no result",
+                            },
+                        }
+
+                    result = dict(outcome.get("result") or {})
+                    if outcome.get("status") == "ok":
+                        stage_status = STAGE_STATUS_SUCCEEDED
+                        error = ""
+                        break
+
+                    error_code = (
+                        str(result.get("errorCode") or "").strip()
+                    )
+                    failure_plan = self.decision_policy.for_stage_error(
+                        job_id=job_id,
+                        stage=stage,
+                        error_code=error_code,
+                        retry_count=retry_count,
+                    )
+                    if failure_plan is None:
+                        stage_status = STAGE_STATUS_FAILED
+                        error = str(
+                            result.get("error") or "Pipeline stage failed"
+                        )
+                        failed_stages.append(stage)
+                        break
+                    failure_action = await await_plan(failure_plan, stage)
+                    if failure_action == "retry_once" and retry_count == 0:
+                        with self.database.session() as session:
+                            failed_attempt = self.store.finish_stage(
+                                session,
+                                job_id,
+                                stage,
+                                STAGE_STATUS_FAILED,
+                                result={"errorCode": error_code},
+                                error=error_code,
+                            )
+                            restarted = self.store.start_stage(
+                                session,
+                                job_id,
+                                stage,
+                            )
+                        if failed_attempt is None or restarted is None:
+                            raise RuntimeError(
+                                "Could not restart bounded pipeline stage retry"
+                            )
+                        retry_count = 1
+                        continue
+                    if failure_action == "skip_stage":
+                        stage_status = STAGE_STATUS_SKIPPED
+                        error = error_code or "pipeline_stage_failed"
+                        failed_stages.append(stage)
+                        break
+                    if failure_action == "stop_job":
+                        with self.database.session() as session:
+                            finished = self.store.finish_stage(
+                                session,
+                                job_id,
+                                stage,
+                                STAGE_STATUS_FAILED,
+                                result={"errorCode": error_code},
+                                error=error_code or "pipeline_stage_failed",
+                            )
+                            self.store.skip_pending_stages(session, job_id)
+                            stopped = self.store.set_job_status(
+                                session,
+                                job_id,
+                                JOB_STATUS_FAILED,
+                                expected_statuses={JOB_STATUS_RUNNING},
+                                error_summary=error_code or "pipeline_stage_failed",
+                                finished_at=_utcnow(),
+                            )
+                        if finished is None or not stopped:
+                            raise RuntimeError(
+                                "Could not stop failed pipeline job"
+                            )
+                        return
+                    raise PipelineJobError(
+                        "decision_action_unavailable",
+                        "Pipeline decision action is unavailable",
+                    )
+
+                if stage_status == STAGE_STATUS_SUCCEEDED:
+                    after_plan = self.decision_policy.after_stage(
+                        job_id=job_id,
+                        stage=stage,
+                        result=result,
+                    )
+                    if after_plan is not None:
+                        after_action = await await_plan(after_plan, stage)
+                        if after_action == "open_review_workbench":
+                            await await_manual_review(stage)
+                            after_action = "continue_with_qualified_only"
+                        if after_action == "skip_remaining_pipeline":
+                            skip_remaining = True
+                        elif after_action == "cancel_job":
+                            self.decision_gate.cancel_job(job_id)
+                            with self.database.session() as session:
+                                cancelled_stage = self.store.finish_stage(
+                                    session,
+                                    job_id,
+                                    stage,
+                                    STAGE_STATUS_CANCELLED,
+                                    result={"decision": "cancel_job"},
+                                )
+                            if cancelled_stage is None:
+                                raise RuntimeError(
+                                    "Could not cancel current pipeline stage"
+                                )
+                            self._finish_cancellation(job_id)
+                            return
+                        elif after_action not in {
+                            "continue_with_current_evidence",
+                            "continue_with_qualified_only",
+                        }:
+                            raise PipelineJobError(
+                                "decision_action_unavailable",
+                                "Pipeline decision action is unavailable",
+                            )
                 with self.database.session() as session:
                     finished = self.store.finish_stage(
                         session,
@@ -536,6 +914,11 @@ class PipelineJobRunner:
                         raise RuntimeError(
                             f"Could not finish pipeline stage: {stage}"
                         )
+
+                if skip_remaining:
+                    with self.database.session() as session:
+                        self.store.skip_pending_stages(session, job_id)
+                    break
 
                 if self._is_cancelling(job_id):
                     self._finish_cancellation(job_id)
@@ -567,37 +950,57 @@ class PipelineJobRunner:
                         "Pipeline terminal status CAS failed: "
                         f"expected {final_status}, found {actual_status}"
                     )
+        except _RunnerCancellationRequested:
+            self._finish_cancellation(job_id)
+            return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception("Pipeline job %s failed internally", job_id)
             self._finish_internal_error(job_id, exc)
         finally:
-            cleanup_cancelled = False
-            if browser_session is not None and account is not None:
-                try:
-                    await self.providers.get(account.platform).release(
-                        browser_session
-                    )
-                except asyncio.CancelledError:
-                    cleanup_cancelled = True
-                except Exception:
-                    logger.exception(
-                        "Failed to release browser session for job %s",
-                        job_id,
-                    )
-            if owned_lease is not None:
-                try:
-                    await owned_lease.release()
-                except asyncio.CancelledError:
-                    cleanup_cancelled = True
-                except Exception:
-                    logger.exception(
-                        "Failed to release concurrency lease for job %s",
-                        job_id,
-                    )
-            if cleanup_cancelled:
-                raise asyncio.CancelledError
+            await release_resources(fail_if_incomplete=False)
+
+    async def retry_quarantined_release(
+        self,
+        platform: Any,
+        account_id: int,
+    ) -> bool:
+        """Retry cleanup and unblock one explicitly quarantined account."""
+
+        platform_key = str(getattr(platform, "value", platform)).strip().lower()
+        key = (platform_key, int(account_id))
+        resources = self._quarantined_resources.get(key)
+        if resources is None:
+            return True
+        browser_session, lease = resources
+        try:
+            await self.providers.get(platform_key).release(browser_session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to recover quarantined browser session for %s/%s",
+                platform_key,
+                account_id,
+            )
+            return False
+        if not bool(getattr(browser_session, "_released", False)):
+            return False
+        try:
+            await lease.release()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to recover quarantined account lease for %s/%s",
+                platform_key,
+                account_id,
+            )
+            return False
+        if self._quarantined_resources.get(key) is resources:
+            self._quarantined_resources.pop(key, None)
+        return True
 
     def _load_runnable_job_account(
         self,
@@ -652,6 +1055,22 @@ class PipelineJobRunner:
 
     def _finish_cancellation(self, job_id: str) -> None:
         with self.database.session() as session:
+            running_stages = list(
+                session.scalars(
+                    select(PipelineJobStage).where(
+                        PipelineJobStage.job_id == job_id,
+                        PipelineJobStage.status == STAGE_STATUS_RUNNING,
+                    )
+                )
+            )
+            for stage in running_stages:
+                self.store.finish_stage(
+                    session,
+                    job_id,
+                    stage.stage,
+                    STAGE_STATUS_CANCELLED,
+                    result={"decision": "cancel_requested"},
+                )
             self.store.cancel_pending_stages(session, job_id)
             self.store.set_job_status(
                 session,

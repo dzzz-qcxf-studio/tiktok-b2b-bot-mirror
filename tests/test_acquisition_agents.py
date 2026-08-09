@@ -1283,6 +1283,12 @@ async def test_pipeline_campaign_collect_persists_evidence_without_outreach(
             "relevant_video_count": 0,
             "candidate_count": 1,
         }],
+        "remaining_budget": {
+            "pages": 6,
+            "llmCalls": 99,
+            "durationSeconds": 3599.9,
+        },
+        "truncation_reasons": [],
     }
     passed_config = collector.collect.await_args.args[0]
     assert passed_config["acquisition_mode"] is True

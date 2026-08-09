@@ -946,6 +946,33 @@ class PipelineJobStore:
         session.expire_all()
         return int(result.rowcount or 0)
 
+    def skip_pending_stages(
+        self,
+        session: Session,
+        job_id: str,
+    ) -> int:
+        """Mark every not-yet-started stage skipped at a policy boundary."""
+
+        validate_stage_transition(
+            STAGE_STATUS_PENDING,
+            STAGE_STATUS_SKIPPED,
+        )
+        result = session.execute(
+            update(PipelineJobStage)
+            .where(
+                PipelineJobStage.job_id == job_id,
+                PipelineJobStage.status == STAGE_STATUS_PENDING,
+            )
+            .values(
+                status=STAGE_STATUS_SKIPPED,
+                finished_at=datetime.utcnow(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        session.flush()
+        session.expire_all()
+        return int(result.rowcount or 0)
+
     def recover_interrupted(self, session: Session) -> int:
         validate_stage_transition(STAGE_STATUS_RUNNING, STAGE_STATUS_FAILED)
         validate_stage_transition(

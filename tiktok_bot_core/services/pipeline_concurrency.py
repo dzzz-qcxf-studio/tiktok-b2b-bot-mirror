@@ -13,6 +13,7 @@ class ConcurrencyLease:
     account_id: int
     _manager: "PipelineConcurrencyManager" = field(repr=False)
     _released: bool = field(default=False, init=False, repr=False)
+    _quarantined: bool = field(default=False, init=False, repr=False)
     _release_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
         init=False,
@@ -34,6 +35,27 @@ class ConcurrencyLease:
                     cancelled = True
             await release_task
             self._released = True
+            self._quarantined = False
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def quarantine(self) -> None:
+        """Block this account without consuming a platform capacity slot."""
+
+        async with self._release_lock:
+            if self._released or self._quarantined:
+                return
+            quarantine_task = asyncio.create_task(
+                self._manager._quarantine(self.platform, self.account_id)
+            )
+            cancelled = False
+            while not quarantine_task.done():
+                try:
+                    await asyncio.shield(quarantine_task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            await quarantine_task
+            self._quarantined = True
             if cancelled:
                 raise asyncio.CancelledError
 
@@ -69,6 +91,7 @@ class PipelineConcurrencyManager:
         self._limits = limits
         self._active_by_platform: dict[str, int] = {}
         self._active_accounts: set[tuple[str, int]] = set()
+        self._quarantined_accounts: set[tuple[str, int]] = set()
         self._condition = asyncio.Condition()
 
     async def acquire(
@@ -122,6 +145,12 @@ class PipelineConcurrencyManager:
     def is_account_active(self, platform: Any, account_id: int) -> bool:
         return (_platform_name(platform), int(account_id)) in self._active_accounts
 
+    def is_account_quarantined(self, platform: Any, account_id: int) -> bool:
+        return (
+            _platform_name(platform),
+            int(account_id),
+        ) in self._quarantined_accounts
+
     def _can_acquire(
         self,
         platform: str,
@@ -132,19 +161,39 @@ class PipelineConcurrencyManager:
             limit > 0
             and self.active_count(platform) < limit
             and account_key not in self._active_accounts
+            and account_key not in self._quarantined_accounts
         )
+
+    async def _quarantine(self, platform: str, account_id: int) -> None:
+        account_key = (platform, account_id)
+        async with self._condition:
+            if account_key in self._quarantined_accounts:
+                return
+            if account_key in self._active_accounts:
+                self._active_accounts.remove(account_key)
+                remaining = self.active_count(platform) - 1
+                if remaining:
+                    self._active_by_platform[platform] = remaining
+                else:
+                    self._active_by_platform.pop(platform, None)
+            self._quarantined_accounts.add(account_key)
+            self._condition.notify_all()
 
     async def _release(self, platform: str, account_id: int) -> None:
         account_key = (platform, account_id)
         async with self._condition:
-            if account_key not in self._active_accounts:
+            was_active = account_key in self._active_accounts
+            was_quarantined = account_key in self._quarantined_accounts
+            if not was_active and not was_quarantined:
                 return
-            self._active_accounts.remove(account_key)
-            remaining = self.active_count(platform) - 1
-            if remaining:
-                self._active_by_platform[platform] = remaining
-            else:
-                self._active_by_platform.pop(platform, None)
+            if was_active:
+                self._active_accounts.remove(account_key)
+                remaining = self.active_count(platform) - 1
+                if remaining:
+                    self._active_by_platform[platform] = remaining
+                else:
+                    self._active_by_platform.pop(platform, None)
+            self._quarantined_accounts.discard(account_key)
             self._condition.notify_all()
 
 

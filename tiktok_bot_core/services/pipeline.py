@@ -9,11 +9,15 @@
 - 进度回报（yield 阶段结果，UI 可流式展示）
 """
 
+import asyncio
 import logging
 import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, AsyncIterator
+
+import httpx
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from tiktok_bot_core.browser.providers import BrowserSession
 from tiktok_bot_core.events.bus import Event, EventType, get_event_bus
@@ -68,6 +72,124 @@ def _ensure_registered():
     reg = get_registry()
     if not reg.list_plugins()["collectors"]:
         register_default_plugins(reg)
+
+
+_STABLE_STAGE_ERROR_CODES = frozenset(
+    {
+        "network",
+        "timeout",
+        "upstream_server",
+        "account_blocked",
+        "authentication_required",
+        "captcha_required",
+        "login_required",
+        "risk_control",
+    }
+)
+
+
+def _stable_stage_error_code(error: Exception) -> str:
+    """Return only an explicit, registered category; never parse error text."""
+
+    if isinstance(
+        error,
+        (
+            TimeoutError,
+            asyncio.TimeoutError,
+            httpx.TimeoutException,
+            PlaywrightTimeoutError,
+        ),
+    ):
+        return "timeout"
+    if isinstance(error, (ConnectionError, httpx.NetworkError)):
+        return "network"
+    for attribute in ("error_category", "category", "code"):
+        value = getattr(error, attribute, "")
+        if isinstance(value, str) and value in _STABLE_STAGE_ERROR_CODES:
+            return value
+    return ""
+
+
+def validate_persisted_campaign_strategy(
+    *,
+    persona: Any,
+    strategy_type: Any,
+    comment_template: Any,
+    dm_template: Any,
+    priority: Any,
+    action_plan: Any,
+) -> StrategyResult:
+    """Apply the exact strict validation used immediately before outreach."""
+
+    strategy = StrategyResult.model_validate(
+        {
+            "schema_version": "1.0",
+            "persona": persona,
+            "strategy_type": strategy_type,
+            "comment_template": comment_template,
+            "dm_template": dm_template,
+            "priority": priority,
+            "action_plan": action_plan,
+        }
+    )
+    return render_safe_campaign_strategy(strategy)
+
+
+def _collection_decision_summary(
+    campaign_budget: dict[str, Any],
+    collection_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    """Project authoritative collector totals into a safe decision summary."""
+
+    totals = dict(collection_metrics.get("totals") or {})
+
+    def number(name: str) -> float:
+        value = totals.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0.0
+        if not math.isfinite(float(value)) or value < 0:
+            return 0.0
+        return float(value)
+
+    max_pages = max(0, int(campaign_budget.get("maxPages", 0) or 0))
+    max_llm_calls = max(
+        0, int(campaign_budget.get("maxLlmCalls", 0) or 0)
+    )
+    max_duration_seconds = max(
+        0.0,
+        float(campaign_budget.get("maxDurationMinutes", 0) or 0) * 60,
+    )
+    remaining = {
+        "pages": max(0, max_pages - int(number("pages"))),
+        "llmCalls": max(
+            0,
+            max_llm_calls - int(number("llm_calls")),
+        ),
+        "durationSeconds": max(
+            0.0,
+            max_duration_seconds - number("duration_seconds"),
+        ),
+    }
+    reasons: set[str] = set()
+    metrics = collection_metrics.get("keywords")
+    if isinstance(metrics, dict):
+        for metric in metrics.values():
+            if not isinstance(metric, dict):
+                continue
+            values = metric.get("truncation_reasons")
+            if isinstance(values, (list, tuple, set, frozenset)):
+                reasons.update(
+                    value.strip()
+                    for value in values
+                    if isinstance(value, str) and value.strip()
+                )
+            exhaustion = metric.get("exhaustion_reason")
+            if isinstance(exhaustion, str) and exhaustion.strip():
+                reasons.add(exhaustion.strip())
+    return {
+        "remaining_budget": remaining,
+        "truncation_reasons": sorted(reasons),
+    }
 
 
 class PipelineService:
@@ -138,7 +260,11 @@ class PipelineService:
                 )
             except Exception as e:
                 logger.error(f"Pipeline 阶段 [{stage}] 失败: {e}", exc_info=True)
-                yield {"stage": stage, "status": "error", "result": {"error": str(e)}}
+                error_result = {"error": str(e)}
+                error_code = _stable_stage_error_code(e)
+                if error_code:
+                    error_result["errorCode"] = error_code
+                yield {"stage": stage, "status": "error", "result": error_result}
                 await self.bus.publish(
                     Event(EventType.ERROR_OCCURRED, {"stage": stage, "error": str(e)}, source="pipeline")
                 )
@@ -479,6 +605,14 @@ class PipelineService:
             "candidate": candidate_count,
             "needs_more_evidence": needs_more_evidence,
             "keyword_stats": keyword_stats,
+            **_collection_decision_summary(
+                {
+                    "maxPages": budget.max_pages,
+                    "maxLlmCalls": budget.max_llm_calls,
+                    "maxDurationMinutes": budget.max_duration_minutes,
+                },
+                collection_metrics,
+            ),
         }
 
     @staticmethod
@@ -1411,19 +1545,13 @@ class PipelineService:
                     user_status,
                 ) = tuple(row)
                 try:
-                    safe_strategy = StrategyResult.model_validate(
-                        {
-                            "schema_version": "1.0",
-                            "persona": persona,
-                            "strategy_type": strategy_type,
-                            "comment_template": comment_template,
-                            "dm_template": dm_template,
-                            "priority": priority,
-                            "action_plan": action_plan,
-                        }
-                    )
-                    safe_strategy = render_safe_campaign_strategy(
-                        safe_strategy
+                    safe_strategy = validate_persisted_campaign_strategy(
+                        persona=persona,
+                        strategy_type=strategy_type,
+                        comment_template=comment_template,
+                        dm_template=dm_template,
+                        priority=priority,
+                        action_plan=action_plan,
                     )
                 except Exception:
                     continue

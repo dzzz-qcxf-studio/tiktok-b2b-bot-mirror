@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-09（Hermes 服务端决策状态基础）
+> 最后更新: 2026-08-09（v0.6.7，Hermes Runner 决策策略接线）
 
 ## 单一任务入口
 
@@ -109,7 +109,7 @@ Authorization、浏览器 Profile、Prompt/Response 和未知字段不能落库�
 Store 写入真实 Job 事件，`waiting_decision`、10 秒默认、受认证实时 API 和 Web 作战窗口均未
 完成。下面按后续小步记录新增能力，当前页面仍不应被描述为已经支持互动关卡。
 
-### H4-B 服务端决策状态基础
+### H4-B 服务端决策状态与 Runner 策略
 
 Job 与 Stage 增加 `waiting_decision`，只能通过专用双实体 CAS 在
 `running ↔ waiting_decision` 间迁移。通用 `set_job_status()` 明确拒绝进入等待或从等待恢复，
@@ -127,8 +127,48 @@ checkpoint。等待协程被取消或 clock/sleeper/数据库发生异常时，G
 恢复运行；恢复失败则只把当前 Job/Stage 降级为 interrupted/failed，不能永久遗留 waiting。
 关闭事件循环上的陈旧 waiter 会被逐个剔除，不会让已经提交的 resolve/cancel 对外误报失败。
 
-本小步尚未把 Gate 接入 collect/filter/outreach，也没有新增 API 或前端交互。当前真实 Pipeline
-仍按原阶段流程运行；具体何时创建关卡、默认选项怎样影响后续阶段，属于 H4-B 下一小步。
+Task 5 已把 Gate 接入 AI 获客 Runner；legacy Job 没有 AcquisitionCampaign，不创建这些关卡。
+策略只公开当时真正可执行的固定 option 子集，且默认项必须属于该子集：
+
+- **collect 完成后**：仅当候选为零、`needs_more_evidence` 比例过高或 Collector 明确返回权威
+  截断时创建 `insufficient_evidence`。默认 `continue_with_current_evidence`；还可跳过剩余管线或
+  取消任务。当前没有安全的累计预算深挖执行器，因此即使快照仍有余量也不公开
+  `deepen_with_remaining_budget`，不会用一次新执行重新消费完整冻结预算；
+- **filter 完成后**：只读取当前 Job、当前平台持久化的 `manual_review/need_enrichment` 待办；
+  有待办时创建 `qualification_review`，默认 `continue_with_qualified_only`，不会修改任何候选
+  `qualified/rejected` 终态。批量补资料执行器尚未实现，所以不公开对应 option；
+- **outreach 开始前**：创建 `outreach_confirmation`。只有建单包含 outreach 且 Campaign 与
+  Job 平台一致时才保持默认 `execute_approved_outreach`；执行该默认动作仍只处理当前 Job、
+  当前平台、人工 `qualified`，并逐条使用与实际 outreach 相同的严格 `StrategyResult` 校验，
+  无合法目标时安全返回零。`skip_outreach` 会直接把本阶段置为 skipped，不调用发送执行器。
+
+普通关卡仍由服务端在 10 秒后执行默认项，因此全程无人选择也能进入终态。用户在普通关卡中
+主动选择 `open_review_workbench` 时，普通 checkpoint 立即解决并进入第二个显式人工会话；该
+会话没有自动 timeout，页面关闭也不会替用户作出资格结论。Runner 在进入人工会话前释放
+Browser Session 和账号并发租约；复核完成后不复用旧对象，而是复用 `PipelineJobService`
+建单时的完整 preflight，重新检查账号仍为 `logged_in`、账号与 Job 平台一致、TikTok 指纹
+Provider/Profile 完整及 Provider 可用，再获取全新租约、Browser Session、PipelineService 和
+`PipelineRunContext`。Provider 调用正常返回但 Session 未标记 `_released` 仍视为释放失败；
+只有 Browser Session 已确认释放后才会归还账号租约。一次释放失败会在 Runner 最终清理中
+重试。若仍无法确认释放，Job 稳定失败，Session 与 lease 会进入可触达的
+账号级 quarantine：该账号继续 fail-closed，但不占用平台并发名额，其他账号仍可运行；进程内
+幂等恢复入口会在后续释放成功后解除 quarantine。释放、重获、取消或等待异常都会关闭当前
+checkpoint/waiter，并收口到稳定 Job/Stage 终态。
+
+Runner 在普通关卡返回后、每次实际调用阶段执行器前，以及人工复核后等待新平台 slot 的循环中
+都会重新读取权威取消状态。因此选择 `execute` 的同一时刻发生取消不会再调用 outreach；人工
+复核完成后即使平台 slot 被其他任务占用，取消也不必等待该 slot 释放即可进入 `cancelled`，且
+不会获取新的 Browser Session 或遗留目标账号租约。
+
+错误关卡只接受显式稳定分类或明确异常类型。`network/timeout/upstream_server` 最多重试一次，
+重试会增加当前 Stage attempt，但不会重跑已经成功的其他阶段；再次失败默认 `skip_stage` 并让
+Job 形成 `partial_failed`。账号阻断默认安全跳过；尚无真实执行器的深挖、批量补资料和账号恢复
+动作一律不公开。Task 5 核心/Runtime、H4-A、Pipeline API/Core、Acquisition 与 Browse 分批
+组合回归共 **474 passed**。
+
+当前仍未完成 H4-B Task 6 的 Hermes/Browse 事件到持久化 Job 事件表绑定；也没有新增受认证
+实时 API 或前端作战窗口。因此后端已经能自动创建、超时解决和等待显式人工关卡，但现有页面
+还不能显示实时事件、倒计时或提交关卡选择，不能把 Task 5 描述成完整可视化交互已经交付。
 
 ## 阶段执行流程
 
@@ -185,7 +225,8 @@ Runner 为每个 Stage: pending → running → terminal
 ## 状态、取消、重试与恢复
 
 - Job：`queued → running → succeeded/partial_failed/failed`；
-  运行中取消先进入 `cancelling`，在阶段边界结束为 `cancelled`。
+  运行中取消先进入 `cancelling`，在决策返回、执行器调用前、人工重获 slot 等安全边界结束为
+  `cancelled`。
 - Stage：`pending → running → succeeded/failed/skipped/cancelled`。
 - queued 任务取消会直接变为 `cancelled`；终态不可原地重开。
 - retry 会创建新 Job 并记录 `retry_of_job_id`。legacy Job 从原任务首个失败阶段开始；带

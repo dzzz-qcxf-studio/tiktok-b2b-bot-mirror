@@ -113,6 +113,123 @@ def test_checkpoint_registry_is_fixed_and_defaults_are_registered():
 
 
 @pytest.mark.asyncio
+async def test_registered_option_subset_uses_subset_default(db):
+    job_id, stage = _seed_running_stage(db)
+    fake = FakeClock()
+    gate = DecisionGateService(
+        db,
+        timeout_seconds=0.01,
+        poll_interval_seconds=0.01,
+        clock=fake.now,
+        sleeper=fake.sleep,
+    )
+
+    resolution = await gate.await_decision(
+        job_id=job_id,
+        stage=stage,
+        kind="insufficient_evidence",
+        option_keys=("skip_remaining_pipeline", "cancel_job"),
+        default_option_key="skip_remaining_pipeline",
+        context={"summary": "Only executable actions are exposed"},
+    )
+
+    assert resolution.option_key == "skip_remaining_pipeline"
+    assert resolution.source == "timeout"
+    with db.session() as session:
+        checkpoint = session.get(PipelineDecisionCheckpoint, resolution.checkpoint_id)
+        assert checkpoint.option_keys_json == [
+            "skip_remaining_pipeline",
+            "cancel_job",
+        ]
+        assert checkpoint.default_option_key == "skip_remaining_pipeline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("option_keys", "default_option_key"),
+    [
+        (("invented_action",), "invented_action"),
+        (("cancel_job",), "continue_with_current_evidence"),
+        ((), "continue_with_current_evidence"),
+    ],
+)
+async def test_option_subset_rejects_unknown_empty_or_external_default(
+    db, option_keys, default_option_key
+):
+    job_id, stage = _seed_running_stage(db)
+    gate = DecisionGateService(db)
+
+    with pytest.raises(DecisionGateValidationError):
+        await gate.await_decision(
+            job_id=job_id,
+            stage=stage,
+            kind="insufficient_evidence",
+            option_keys=option_keys,
+            default_option_key=default_option_key,
+            context={"summary": "invalid subset"},
+        )
+
+    with db.session() as session:
+        job = PipelineJobStore().get_job(session, job_id)
+        assert job is not None
+        assert job.status == JOB_STATUS_RUNNING
+        assert job.stages[0].status == STAGE_STATUS_RUNNING
+        assert PipelineLiveStore().get_active_checkpoint(
+            session, job_id=job_id
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_manual_review_session_never_times_out_after_sentinel(db):
+    job_id, stage = _seed_running_stage(db)
+    fake = FakeClock()
+    crossed_sentinel = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def cross_all_deadlines(_delay: float) -> None:
+        fake.current = datetime.max
+        crossed_sentinel.set()
+        await release_sleep.wait()
+
+    gate = DecisionGateService(
+        db,
+        poll_interval_seconds=0.01,
+        clock=fake.now,
+        sleeper=cross_all_deadlines,
+    )
+    waiting = asyncio.create_task(
+        gate.await_manual_review(
+            job_id=job_id,
+            stage=stage,
+            context={"summary": "Explicit reviewer session"},
+        )
+    )
+    checkpoint_id, version = await _wait_for_checkpoint(db, job_id)
+    await asyncio.wait_for(crossed_sentinel.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert waiting.done() is False
+    manual = gate.resolve(
+        job_id=job_id,
+        checkpoint_id=checkpoint_id,
+        option_key="review_complete",
+        version=version,
+        operator="reviewer@example.test",
+    )
+    awaited = await asyncio.wait_for(waiting, timeout=1)
+
+    assert awaited == manual
+    assert manual.kind == "manual_review_session"
+    assert manual.source == "human"
+    assert manual.deadline_at is None
+    with db.session() as session:
+        checkpoint = session.get(PipelineDecisionCheckpoint, checkpoint_id)
+        assert checkpoint is not None
+        assert checkpoint.deadline_at == datetime.max
+        assert checkpoint.context_json["manualSession"] is True
+
+
+@pytest.mark.asyncio
 async def test_human_resolution_resumes_job_and_stage(db):
     job_id, stage = _seed_running_stage(db)
     gate = DecisionGateService(db, timeout_seconds=10, poll_interval_seconds=0.01)

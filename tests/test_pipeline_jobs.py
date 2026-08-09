@@ -1,5 +1,6 @@
 """统一 Pipeline 任务持久化模型测试。"""
 
+import asyncio
 import gc
 import tempfile
 import threading
@@ -7,6 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy
@@ -1927,3 +1929,1143 @@ def test_experience_rule_dimensions_are_migrated_for_existing_table():
             path.unlink()
         except PermissionError:
             pass
+
+
+class _DecisionRunnerProvider:
+    def __init__(self) -> None:
+        self.acquired: list[int] = []
+        self.released: list[int] = []
+
+    async def check_available(self, _account):
+        from tiktok_bot_core.browser.providers import BrowserAvailability
+
+        return BrowserAvailability(available=True)
+
+    async def acquire(self, account):
+        from tiktok_bot_core.browser.providers import BrowserSession
+
+        self.acquired.append(account.id)
+        return BrowserSession(
+            platform=account.platform,
+            account_id=account.id,
+            client=SimpleNamespace(),
+        )
+
+    async def release(self, browser_session):
+        browser_session._released = True
+        self.released.append(browser_session.account_id)
+
+
+class _DecisionRunnerPipeline:
+    def __init__(self, outcomes):
+        self.outcomes = {
+            stage: list(stage_outcomes)
+            for stage, stage_outcomes in outcomes.items()
+        }
+        self.calls: list[str] = []
+
+    async def run(self, _context, *, stages, **_configs):
+        stage = stages[0]
+        self.calls.append(stage)
+        queued = self.outcomes.get(stage)
+        if queued:
+            outcome = queued.pop(0)
+        else:
+            outcome = {"status": "ok", "result": {"stage": stage}}
+        yield {"stage": stage, **outcome}
+
+
+class _DecisionRunnerClock:
+    def __init__(self) -> None:
+        self.current = datetime(2026, 8, 9, 12, 0, 0)
+
+    def now(self):
+        return self.current
+
+    async def sleep(self, delay):
+        self.current += timedelta(seconds=delay)
+        await asyncio.sleep(0)
+
+
+class _ScriptedDecisionGate:
+    def __init__(
+        self,
+        database,
+        options,
+        *,
+        on_manual=None,
+        on_decision=None,
+    ):
+        self.database = database
+        self.options = list(options)
+        self.on_manual = on_manual
+        self.on_decision = on_decision
+        self.calls: list[tuple[str, str]] = []
+        self.manual_calls = 0
+
+    async def await_decision(self, **kwargs):
+        option = self.options.pop(0)
+        self.calls.append((kwargs["kind"], option))
+        if self.on_decision is not None:
+            callback_result = self.on_decision(kwargs, option)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
+        return SimpleNamespace(option_key=option, source="human")
+
+    async def await_manual_review(self, **_kwargs):
+        self.manual_calls += 1
+        if self.on_manual is not None:
+            callback_result = self.on_manual()
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
+        return SimpleNamespace(option_key="review_complete", source="human")
+
+    def cancel_job(self, job_id):
+        from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+        with self.database.session() as session:
+            job = PipelineJobStore().request_cancel(session, job_id)
+            return (
+                None
+                if job is None
+                else SimpleNamespace(job_id=job.id, status=job.status)
+            )
+
+
+def _seed_decision_runner_job(
+    database,
+    *,
+    stages,
+    qualification_status=None,
+    platform="douyin",
+    browser_provider="",
+    browser_profile_id="",
+):
+    from tiktok_bot_core.models.entities import (
+        PipelineJobUser,
+        TikTokAccount,
+        User,
+    )
+    from tiktok_bot_core.storage.acquisition_store import AcquisitionStore
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    with database.session() as session:
+        account = TikTokAccount(
+            platform=platform,
+            username=f"decision-account-{uuid.uuid4().hex}",
+            status="logged_in",
+            cookies_json="[]",
+            browser_provider=browser_provider,
+            browser_profile_id=browser_profile_id,
+        )
+        session.add(account)
+        session.flush()
+        job = PipelineJobStore().create_job(
+            session,
+            platform=platform,
+            account_mode="specified",
+            account_id=account.id,
+            stages=stages,
+            config_snapshot={"businessMode": "ai_acquisition"},
+        )
+        AcquisitionStore().create_campaign(
+            session,
+            job_id=job.id,
+            platform=platform,
+            countries=["CN"],
+            industries=["power"],
+            customer_roles=["buyer"],
+            search_budget={
+                "maxPages": 10,
+                "maxLlmCalls": 20,
+                "maxDurationMinutes": 30,
+            },
+        )
+        if qualification_status is not None:
+            user = User(
+                platform=platform,
+                tiktok_id=f"decision-user-{uuid.uuid4().hex}",
+                username="decision-user",
+            )
+            session.add(user)
+            session.flush()
+            link = PipelineJobUser(
+                job_id=job.id,
+                user_id=user.id,
+                source_stage="collect",
+                status="pending",
+            )
+            session.add(link)
+            session.flush()
+            link.qualification_status = qualification_status
+            session.flush()
+        assert PipelineJobStore().claim_job(
+            session,
+            job.id,
+            account_id=account.id,
+        )
+        return job.id, account.id
+
+
+@pytest.mark.asyncio
+async def test_ai_runner_no_selection_times_out_through_collect_and_outreach(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import (
+        PipelineDecisionCheckpoint,
+        PipelineJob,
+    )
+    from tiktok_bot_core.models.pipeline_states import (
+        JOB_STATUS_SUCCEEDED,
+        STAGE_STATUS_SUCCEEDED,
+    )
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_decisions import DecisionGateService
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "outreach"],
+    )
+    provider = _DecisionRunnerProvider()
+    clock = _DecisionRunnerClock()
+    gate = DecisionGateService(
+        db,
+        timeout_seconds=0.01,
+        poll_interval_seconds=0.01,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 0, "needs_more_evidence": 0},
+                }
+            ],
+            "outreach": [{"status": "ok", "result": {"sent": 0}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        checkpoints = list(
+            session.scalars(
+                select(PipelineDecisionCheckpoint)
+                .where(PipelineDecisionCheckpoint.job_id == job_id)
+                .order_by(PipelineDecisionCheckpoint.created_at)
+            )
+        )
+        assert job.status == JOB_STATUS_SUCCEEDED
+        assert [stage.status for stage in job.stages] == [
+            STAGE_STATUS_SUCCEEDED,
+            STAGE_STATUS_SUCCEEDED,
+        ]
+        assert [item.kind for item in checkpoints] == [
+            "insufficient_evidence",
+            "outreach_confirmation",
+        ]
+        assert [item.resolution_source for item in checkpoints] == [
+            "timeout",
+            "timeout",
+        ]
+    assert pipeline.calls == ["collect", "outreach"]
+    assert provider.acquired == [account_id]
+    assert provider.released == [account_id]
+
+
+@pytest.mark.asyncio
+async def test_open_review_releases_resources_then_reacquires_and_revalidates(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.models.pipeline_states import JOB_STATUS_SUCCEEDED
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = _DecisionRunnerProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+
+    def assert_released_for_manual():
+        assert provider.released == [account_id]
+        assert concurrency.is_account_active("douyin", account_id) is False
+
+    gate = _ScriptedDecisionGate(
+        db,
+        ["open_review_workbench"],
+        on_manual=assert_released_for_manual,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        assert session.get(PipelineJob, job_id).status == JOB_STATUS_SUCCEEDED
+    assert gate.manual_calls == 1
+    assert provider.acquired == [account_id, account_id]
+    assert provider.released == [account_id, account_id]
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("option", "expected_job_status", "expected_stage_statuses"),
+    [
+        ("skip_remaining_pipeline", "succeeded", ["succeeded", "skipped", "skipped"]),
+        ("cancel_job", "cancelled", ["cancelled", "cancelled", "cancelled"]),
+    ],
+)
+async def test_collect_control_actions_have_deterministic_terminal_states(
+    db, option, expected_job_status, expected_stage_statuses
+):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter", "outreach"],
+    )
+    provider = _DecisionRunnerProvider()
+    gate = _ScriptedDecisionGate(db, [option])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 0, "needs_more_evidence": 0},
+                }
+            ]
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == expected_job_status
+        assert [stage.status for stage in job.stages] == expected_stage_statuses
+    assert pipeline.calls == ["collect"]
+
+
+@pytest.mark.asyncio
+async def test_outreach_skip_never_calls_outreach_executor(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "outreach"],
+    )
+    provider = _DecisionRunnerProvider()
+    gate = _ScriptedDecisionGate(db, ["skip_outreach"])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ]
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "succeeded"
+        assert [stage.status for stage in job.stages] == ["succeeded", "skipped"]
+    assert pipeline.calls == ["collect"]
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_retries_once_then_defaults_to_partial_skip(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(db, stages=["collect", "report"])
+    provider = _DecisionRunnerProvider()
+    gate = _ScriptedDecisionGate(db, ["retry_once", "skip_stage"])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "report": [
+                {
+                    "status": "error",
+                    "result": {"errorCode": "network", "error": "first"},
+                },
+                {
+                    "status": "error",
+                    "result": {"errorCode": "network", "error": "second"},
+                },
+            ],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "partial_failed"
+        assert [stage.status for stage in job.stages] == ["succeeded", "skipped"]
+        assert [stage.attempt for stage in job.stages] == [1, 2]
+    assert pipeline.calls == ["collect", "report", "report"]
+    assert gate.calls == [
+        ("retryable_failure", "retry_once"),
+        ("retryable_failure", "skip_stage"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_outreach_review_completion_rechecks_policy_before_execution(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "outreach"],
+        qualification_status="manual_review",
+    )
+    provider = _DecisionRunnerProvider()
+    gate = _ScriptedDecisionGate(
+        db,
+        ["open_review_workbench", "skip_outreach"],
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ]
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "succeeded"
+        assert [stage.status for stage in job.stages] == ["succeeded", "skipped"]
+    assert gate.calls == [
+        ("outreach_confirmation", "open_review_workbench"),
+        ("outreach_confirmation", "skip_outreach"),
+    ]
+    assert gate.manual_calls == 1
+    assert pipeline.calls == ["collect"]
+
+
+@pytest.mark.asyncio
+async def test_manual_resource_release_retries_before_releasing_lease(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    class ReleaseFailsOnceProvider(_DecisionRunnerProvider):
+        def __init__(self):
+            super().__init__()
+            self.sessions = []
+
+        async def acquire(self, account):
+            browser_session = await super().acquire(account)
+            self.sessions.append(browser_session)
+            return browser_session
+
+        async def release(self, browser_session):
+            self.released.append(browser_session.account_id)
+            if len(self.released) == 1:
+                raise RuntimeError("injected release failure")
+            browser_session._released = True
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = ReleaseFailsOnceProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = _ScriptedDecisionGate(db, ["open_review_workbench"])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "failed"
+        assert job.stages[1].status == "failed"
+        assert job.error_summary.startswith("manual_review_release_failed:")
+    assert gate.manual_calls == 0
+    assert provider.released == [account_id, account_id]
+    assert provider.sessions[0]._released is True
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_noop_manual_release_fails_closed_without_entering_manual(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    class NoopReleaseProvider(_DecisionRunnerProvider):
+        def __init__(self):
+            super().__init__()
+            self.sessions = []
+
+        async def acquire(self, account):
+            browser_session = await super().acquire(account)
+            self.sessions.append(browser_session)
+            return browser_session
+
+        async def release(self, browser_session):
+            self.released.append(browser_session.account_id)
+            # Returning normally is not enough: the BrowserSession must also
+            # confirm that its underlying client was closed.
+
+    def reject_manual_entry():
+        raise RuntimeError("manual review must not open")
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = NoopReleaseProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = _ScriptedDecisionGate(
+        db,
+        ["open_review_workbench"],
+        on_manual=reject_manual_entry,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "failed"
+        assert job.stages[1].status == "failed"
+        assert job.error_summary.startswith("manual_review_release_failed:")
+    assert gate.manual_calls == 0
+    assert provider.released == [account_id, account_id]
+    assert provider.sessions[0]._released is False
+    assert concurrency.is_account_active("douyin", account_id) is False
+    assert concurrency.is_account_quarantined("douyin", account_id) is True
+    assert concurrency.active_count("douyin") == 0
+    other_lease = await concurrency.try_acquire("douyin", account_id + 1)
+    assert other_lease is not None
+    await other_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_persistent_manual_release_failure_quarantines_account_lease(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    class ReleaseAlwaysFailsProvider(_DecisionRunnerProvider):
+        def __init__(self):
+            super().__init__()
+            self.sessions = []
+            self.should_fail = True
+
+        async def acquire(self, account):
+            browser_session = await super().acquire(account)
+            self.sessions.append(browser_session)
+            return browser_session
+
+        async def release(self, browser_session):
+            self.released.append(browser_session.account_id)
+            if self.should_fail:
+                raise RuntimeError("persistent release failure")
+            browser_session._released = True
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = ReleaseAlwaysFailsProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = _ScriptedDecisionGate(db, ["open_review_workbench"])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "failed"
+        assert job.stages[1].status == "failed"
+        assert job.error_summary.startswith("manual_review_release_failed:")
+    assert gate.manual_calls == 0
+    assert provider.released == [account_id, account_id]
+    assert provider.sessions[0]._released is False
+    assert concurrency.is_account_active("douyin", account_id) is False
+    assert concurrency.is_account_quarantined("douyin", account_id) is True
+    assert concurrency.active_count("douyin") == 0
+    assert await concurrency.try_acquire("douyin", account_id) is None
+    other_lease = await concurrency.try_acquire("douyin", account_id + 1)
+    assert other_lease is not None
+    await other_lease.release()
+
+    provider.should_fail = False
+    assert await runner.retry_quarantined_release("douyin", account_id) is True
+    assert await runner.retry_quarantined_release("douyin", account_id) is True
+    assert concurrency.is_account_quarantined("douyin", account_id) is False
+    recovered_lease = await concurrency.try_acquire("douyin", account_id)
+    assert recovered_lease is not None
+    await recovered_lease.release()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_outreach_decision_prevents_outreach_execution(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "outreach"],
+    )
+
+    def cancel_when_outreach_selected(kwargs, option):
+        if kwargs["kind"] != "outreach_confirmation":
+            return
+        assert option == "execute_approved_outreach"
+        with db.session() as session:
+            cancelled = PipelineJobStore().request_cancel(session, job_id)
+            assert cancelled is not None
+
+    provider = _DecisionRunnerProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = _ScriptedDecisionGate(
+        db,
+        ["continue_with_current_evidence", "execute_approved_outreach"],
+        on_decision=cancel_when_outreach_selected,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 0, "needs_more_evidence": 0},
+                }
+            ],
+            "outreach": [{"status": "ok", "result": {"sent": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "cancelled"
+        assert [stage.status for stage in job.stages] == [
+            "succeeded",
+            "cancelled",
+        ]
+    assert pipeline.calls == ["collect"]
+    assert provider.released == [account_id]
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_manual_resume_does_not_wait_for_busy_platform_slot(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = _DecisionRunnerProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    blocker_ready = asyncio.Event()
+    blocker_holder = {}
+
+    async def occupy_slot_after_manual_release():
+        blocker_holder["lease"] = await concurrency.acquire(
+            "douyin",
+            account_id + 100_000,
+        )
+        blocker_ready.set()
+
+    gate = _ScriptedDecisionGate(
+        db,
+        ["open_review_workbench"],
+        on_manual=occupy_slot_after_manual_release,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+    running = asyncio.create_task(runner.run_job(job_id))
+
+    try:
+        await asyncio.wait_for(blocker_ready.wait(), timeout=1)
+        with db.session() as session:
+            cancelled = PipelineJobStore().request_cancel(session, job_id)
+            assert cancelled is not None
+        await asyncio.wait_for(asyncio.shield(running), timeout=0.5)
+    finally:
+        await blocker_holder["lease"].release()
+        if not running.done():
+            running.cancel()
+            try:
+                await running
+            except asyncio.CancelledError:
+                pass
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "cancelled"
+        assert [stage.status for stage in job.stages] == [
+            "succeeded",
+            "cancelled",
+        ]
+    assert provider.acquired == [account_id]
+    assert provider.released == [account_id]
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_manual_resume_preflight_failure_has_stable_terminal_state(db):
+    from tiktok_bot_core.browser.providers import (
+        BrowserAvailability,
+        BrowserProviderRegistry,
+    )
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    class ResumeUnavailableProvider(_DecisionRunnerProvider):
+        async def check_available(self, _account):
+            return BrowserAvailability(
+                available=False,
+                code="injected_unavailable",
+                message="ignored diagnostics",
+            )
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = ResumeUnavailableProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = _ScriptedDecisionGate(db, ["open_review_workbench"])
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "failed"
+        assert job.stages[1].status == "failed"
+        assert job.error_summary.startswith("injected_unavailable:")
+    assert gate.manual_calls == 1
+    assert provider.acquired == [account_id]
+    assert provider.released == [account_id]
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_cancelling_manual_review_wakes_runner_without_resource_leak(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_decisions import DecisionGateService
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_live_store import PipelineLiveStore
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+    )
+    provider = _DecisionRunnerProvider()
+    concurrency = PipelineConcurrencyManager(douyin_limit=1)
+    gate = DecisionGateService(
+        db,
+        timeout_seconds=60,
+        poll_interval_seconds=0.01,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+    running = asyncio.create_task(runner.run_job(job_id))
+
+    ordinary = None
+    for _ in range(100):
+        with db.session() as session:
+            ordinary = PipelineLiveStore().get_active_checkpoint(
+                session, job_id=job_id
+            )
+            if ordinary is not None:
+                ordinary = SimpleNamespace(
+                    id=ordinary.id,
+                    kind=ordinary.kind,
+                    version=ordinary.version,
+                )
+                break
+        await asyncio.sleep(0)
+    assert ordinary is not None
+    assert ordinary.kind == "qualification_review"
+    gate.resolve(
+        job_id=job_id,
+        checkpoint_id=ordinary.id,
+        option_key="open_review_workbench",
+        version=ordinary.version,
+    )
+
+    manual = None
+    for _ in range(100):
+        with db.session() as session:
+            manual = PipelineLiveStore().get_active_checkpoint(
+                session, job_id=job_id
+            )
+            if manual is not None and manual.kind == "manual_review_session":
+                manual = SimpleNamespace(
+                    id=manual.id,
+                    kind=manual.kind,
+                    version=manual.version,
+                )
+                break
+        await asyncio.sleep(0)
+    assert manual is not None and manual.kind == "manual_review_session"
+    assert provider.released == [account_id]
+    assert concurrency.is_account_active("douyin", account_id) is False
+
+    gate.cancel_job(job_id)
+    await asyncio.wait_for(running, timeout=1)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "cancelled"
+        assert [stage.status for stage in job.stages] == [
+            "succeeded",
+            "cancelled",
+        ]
+        assert PipelineLiveStore().get_active_checkpoint(
+            session, job_id=job_id
+        ) is None
+    assert provider.acquired == [account_id]
+    assert provider.released == [account_id]
+    assert gate.waiter_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "initial_platform",
+        "browser_provider",
+        "browser_profile_id",
+        "mutation",
+        "expected_code",
+    ),
+    [
+        (
+            "douyin",
+            "",
+            "",
+            {"status": "logged_out"},
+            "account_not_logged_in",
+        ),
+        (
+            "douyin",
+            "",
+            "",
+            {"platform": "tiktok"},
+            "platform_account_mismatch",
+        ),
+        (
+            "tiktok",
+            "fingerprint",
+            "profile-before-review",
+            {"browser_profile_id": ""},
+            "fingerprint_profile_required",
+        ),
+    ],
+)
+async def test_manual_resume_reuses_full_account_preflight(
+    db,
+    initial_platform,
+    browser_provider,
+    browser_profile_id,
+    mutation,
+    expected_code,
+):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob, TikTokAccount
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter"],
+        qualification_status="manual_review",
+        platform=initial_platform,
+        browser_provider=browser_provider,
+        browser_profile_id=browser_profile_id,
+    )
+    provider = _DecisionRunnerProvider()
+    concurrency = PipelineConcurrencyManager(
+        douyin_limit=1,
+        platform_limits={"tiktok": 1},
+    )
+
+    def mutate_account_during_manual():
+        with db.session() as session:
+            account = session.get(TikTokAccount, account_id)
+            for field, value in mutation.items():
+                setattr(account, field, value)
+
+    gate = _ScriptedDecisionGate(
+        db,
+        ["open_review_workbench"],
+        on_manual=mutate_account_during_manual,
+    )
+    pipeline = _DecisionRunnerPipeline(
+        {
+            "collect": [
+                {
+                    "status": "ok",
+                    "result": {"candidate": 1, "needs_more_evidence": 0},
+                }
+            ],
+            "filter": [{"status": "ok", "result": {"manual_review": 1}}],
+        }
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry(
+            {"douyin": provider, "tiktok": provider}
+        ),
+        concurrency=concurrency,
+        pipeline_factory=lambda: pipeline,
+        decision_gate=gate,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "failed"
+        assert job.stages[1].status == "failed"
+        assert job.error_summary.startswith(f"{expected_code}:")
+    assert gate.manual_calls == 1
+    assert provider.acquired == [account_id]
+    assert provider.released == [account_id]
+    assert concurrency.is_account_active(initial_platform, account_id) is False

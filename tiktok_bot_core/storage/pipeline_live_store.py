@@ -160,6 +160,12 @@ _SAFE_METRIC_FIELDS = frozenset(
         "manualReview",
         "needEnrichment",
         "rejected",
+        "candidate",
+        "needsMoreEvidence",
+        "validStrategies",
+        "pages",
+        "llmCalls",
+        "durationSeconds",
     }
 )
 _CHECKPOINT_CONTEXT_FIELDS = frozenset(
@@ -174,6 +180,7 @@ _CHECKPOINT_CONTEXT_FIELDS = frozenset(
         "remainingBudget",
         "defaultReason",
         "blockingReason",
+        "manualSession",
     }
 )
 _SENSITIVE_KEY_PARTS = frozenset(
@@ -476,6 +483,10 @@ def _validate_context(context: Mapping[str, Any]) -> dict[str, Any]:
             "warnings",
             maximum_items=10,
             maximum_length=200,
+        )
+    if "manualSession" in copied and copied["manualSession"] is not True:
+        raise PipelineLiveValidationError(
+            "manualSession must be true when present"
         )
     return copied
 
