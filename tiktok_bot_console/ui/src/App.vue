@@ -5,20 +5,22 @@
         <div class="sb-logo">▣</div>
         <span>Pipeline Lab</span>
       </div>
-      <div class="sb-section">{{ $t('nav.sectionNav') }}</div>
-      <nav class="sb-nav">
-        <router-link v-for="item in navMain" :key="item.path" :to="item.path" class="sb-link" :class="{active:$route.path===item.path}">
-          <span class="icn" v-html="item.icon"></span>
-          <span>{{ $t('nav.'+item.key) }}</span>
-        </router-link>
-      </nav>
-      <div class="sb-section">{{ $t('nav.sectionSystem') }}</div>
-      <nav class="sb-nav">
-        <router-link v-for="item in navSystem" :key="item.path" :to="item.path" class="sb-link" :class="{active:$route.path.startsWith(item.path)}">
-          <span class="icn" v-html="item.icon"></span>
-          <span>{{ $t('nav.'+item.key) }}</span>
-        </router-link>
-      </nav>
+      <div class="sb-nav-scroll">
+        <div class="sb-section">{{ $t('nav.sectionNav') }}</div>
+        <nav class="sb-nav">
+          <router-link v-for="item in navMain" :key="item.path" :to="item.path" class="sb-link" :class="{active:$route.path===item.path}">
+            <span class="icn" v-html="item.icon"></span>
+            <span>{{ $t('nav.'+item.key) }}</span>
+          </router-link>
+        </nav>
+        <div class="sb-section">{{ $t('nav.sectionSystem') }}</div>
+        <nav class="sb-nav">
+          <router-link v-for="item in navSystem" :key="item.path" :to="item.path" class="sb-link" :class="{active:$route.path.startsWith(item.path)}">
+            <span class="icn" v-html="item.icon"></span>
+            <span>{{ $t('nav.'+item.key) }}</span>
+          </router-link>
+        </nav>
+      </div>
       <div class="sb-foot">
         <div class="user">
           <div class="avatar">{{ initials }}</div>
@@ -182,6 +184,7 @@ const crumbCurrent = computed(() => {
   background: linear-gradient(135deg, var(--brand), var(--cyan));
   display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 14px;
 }
+.sb-nav-scroll { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .sb-section { padding: 14px 14px 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--sb-muted); }
 .sb-nav { padding: 6px 8px; flex: 1; overflow-y: auto; }
 .sb-link {
@@ -294,15 +297,24 @@ const crumbCurrent = computed(() => {
     height: calc(64px + env(safe-area-inset-bottom));
     flex-direction: row;
     align-items: stretch;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow: hidden;
     border-top: 1px solid var(--sb-border);
     border-right: 0;
     padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sb-nav-scroll {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
     scrollbar-width: none;
   }
 
-  .sidebar::-webkit-scrollbar {
+  .sb-nav-scroll::-webkit-scrollbar {
     display: none;
   }
 
@@ -312,9 +324,7 @@ const crumbCurrent = computed(() => {
   }
 
   .sb-foot {
-    position: sticky;
-    right: 0;
-    z-index: 1;
+    position: static;
     display: flex;
     flex: 0 0 auto;
     align-items: stretch;

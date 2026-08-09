@@ -586,21 +586,6 @@ onMounted(loadAll)
 .route-error { margin: 8px 0 0; }
 @media (max-width: 1050px) { .summary-grid { grid-template-columns: repeat(2, 1fr); }.provider-grid, .route-grid { grid-template-columns: 1fr; }.route-card:last-child { grid-column: auto; } }
 @media (max-width: 680px) {
-  :global(.sidebar) { width: 64px !important; flex-basis: 64px !important; }
-  :global(.sb-brand) { justify-content: center; padding: 12px; }
-  :global(.sb-brand > span),
-  :global(.sb-section),
-  :global(.sb-link > span:not(.icn)),
-  :global(.sb-foot .user > div),
-  :global(.logout-btn) { display: none; }
-  :global(.sb-nav) { padding: 6px; }
-  :global(.sb-link) { justify-content: center; padding: 10px; }
-  :global(.sb-link.active::before) { left: -6px; }
-  :global(.sb-foot) { justify-content: center; padding: 10px 6px; }
-  :global(.topbar) { padding: 0 12px; }
-  :global(.search) { display: none; }
-  :global(.mock-banner) { align-items: flex-start; flex-wrap: wrap; padding: 8px 12px; }
-  :global(.api-mode-toggle) { width: 100%; margin-left: 0; }
   .llm-page { padding: 16px 12px; }
   .page-head { align-items: flex-start; }
   .head-actions { width: 100%; }

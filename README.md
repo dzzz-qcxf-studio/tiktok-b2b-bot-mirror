@@ -206,6 +206,10 @@ npm install --registry https://registry.npmmirror.com
 ### 启动
 
 ```bash
+# 推荐：在项目根目录一次启动前后端；已健康的服务不会重复启动
+powershell -ExecutionPolicy Bypass -File .\start-services.ps1
+
+# 也可以分别启动
 # 终端 1：后端
 python -m uvicorn tiktok_bot_api.main:app --env-file .env --reload --port 8000
 
@@ -215,6 +219,9 @@ cd tiktok_bot_console/ui && npm run dev
 
 - 前端: http://localhost:5173
 - API 文档: http://localhost:8000/docs
+
+一键脚本会等待两个地址通过健康检查，并把隐藏进程日志写入 `data/logs/`。若 8000 或
+5173 端口被不健康的其他进程占用，脚本会明确报错，不会误报启动成功。
 
 LLM 管理端点全部要求 JWT 或 `X-API-Key` 认证。浏览器跨域默认只允许本机 5173/8080
 来源；部署到其他域名时使用逗号分隔的 `CORS_ALLOWED_ORIGINS` 显式配置，不能使用 `*`。

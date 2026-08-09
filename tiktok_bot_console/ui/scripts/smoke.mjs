@@ -472,7 +472,7 @@ const pipelineViewChecks = [
   ['job actions preserve a newer selection', pipelineViewSrc.includes('const targetId = selectedJob.value.id') && pipelineViewSrc.includes('selectedJobId.value === targetId') && pipelineViewSrc.includes('actionRequestToken')],
   ['account validity gates job creation', acquisitionCreatorSrc.includes('loggedInAccounts.value.length === 0') && acquisitionCreatorSrc.includes('draft.value.accountId = null') && acquisitionCreatorSrc.includes("code: 'account_required'")],
   ['segmented controls expose keyboard radio semantics', acquisitionCreatorSrc.includes('role="radio"') && acquisitionCreatorSrc.includes(':aria-checked=') && acquisitionCreatorSrc.includes('@keydown.left') && acquisitionCreatorSrc.includes('@keydown.right')],
-  ['mobile shell releases content width and keeps navigation', mobileShellSrc.includes('inset: auto 0 0;') && mobileShellSrc.includes('overflow-x: auto;') && mobileShellSrc.includes('padding-bottom: calc(64px + env(safe-area-inset-bottom));') && /\.sb-foot\s*\{[\s\S]{0,260}display:\s*flex/.test(mobileShellSrc) && /\.sb-foot \.logout-btn\s*\{[\s\S]{0,180}min-height:\s*54px/.test(mobileShellSrc)],
+  ['mobile shell separates scrollable navigation from logout', appShellSrc.includes('<div class="sb-nav-scroll">') && mobileShellSrc.includes('padding-bottom: calc(64px + env(safe-area-inset-bottom));') && /\.sidebar\s*\{[\s\S]{0,300}overflow:\s*hidden/.test(mobileShellSrc) && /\.sb-nav-scroll\s*\{[\s\S]{0,260}overflow-x:\s*auto/.test(mobileShellSrc) && /\.sb-foot\s*\{[\s\S]{0,220}position:\s*static/.test(mobileShellSrc) && /\.sb-foot \.logout-btn\s*\{[\s\S]{0,180}min-height:\s*54px/.test(mobileShellSrc)],
 ]
 
 for (const [label, condition] of pipelineViewChecks) {
@@ -726,6 +726,12 @@ if (!configLlmSrc.includes('fetch(') && !configLlmSrc.includes('scrollIntoView')
   fail('LLM page performs no browser-side upstream probe or iframe-hostile scrolling', 'direct fetch or scrollIntoView found')
 }
 
+if (!configLlmSrc.includes(':global(.sidebar)') && !configLlmSrc.includes(':global(.sb-')) {
+  ok('LLM page does not override the global application shell')
+} else {
+  fail('LLM page does not override the global application shell', 'App.vue must be the only owner of sidebar responsive behavior')
+}
+
 if (
   configLlmSrc.includes('type="password"')
   && configLlmSrc.includes("apiKey: ''")
@@ -813,6 +819,17 @@ if (/^VITE_USE_MOCK=false$/m.test(devEnv)) {
   ok('development Auto mode prefers the real backend')
 } else {
   fail('development Auto mode prefers the real backend', 'VITE_USE_MOCK must default to false')
+}
+
+const viteConfigSrc = readFileSync(join(root, 'vite.config.ts'), 'utf8')
+if (
+  /^VITE_ENABLE_DEVTOOLS=false$/m.test(devEnv)
+  && viteConfigSrc.includes("env.VITE_ENABLE_DEVTOOLS === 'true'")
+  && viteConfigSrc.includes('vueDevTools()')
+) {
+  ok('developer tools are opt-in and cannot cover mobile navigation by default')
+} else {
+  fail('developer tools are opt-in and cannot cover mobile navigation by default', 'set VITE_ENABLE_DEVTOOLS=false and gate vueDevTools() in vite.config.ts')
 }
 
 // ---------- 7. Build dist sanity ----------
