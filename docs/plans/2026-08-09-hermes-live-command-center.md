@@ -287,6 +287,9 @@ git commit -m "feat: expose authenticated pipeline live controls"
 
 ### Task 10：阶段 01—02 业务结果组件
 
+> 实施状态：2026-08-11 已完成独立组件、Job-scoped 关键词/来源下钻过滤与 50+6 项验收；
+> Pipeline 页面挂载仍归 Task 12。
+
 **文件**
 
 - 新增：`tiktok_bot_console/ui/src/components/StageDiscoveryResult.vue`

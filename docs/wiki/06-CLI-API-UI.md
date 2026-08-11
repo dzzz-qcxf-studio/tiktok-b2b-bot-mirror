@@ -207,6 +207,11 @@ H4-D Task 9 已新增独立 `HermesMissionMonitor` 组件：单 Job live 首屏�
 以及收起/切 Job/卸载回收均有测试。专项 **14 passed**。该组件在 Task 12 前尚未挂载到
 `Pipeline.vue`，因此当前产品页面仍保持原详情界面，不能提前宣称作战窗口已经可见。
 
+H4-D Task 10 已新增独立阶段 01/02 业务组件。阶段 01 调用 `stage-01 + keywords`，阶段 02 调用
+`stage-02`；候选列表额外接受 `keywordId/sourceType`，与既有发现/资格状态筛选可组合。组件点击
+只发出精确筛选对象，不自行猜测候选；legacy、失败、空、截断与错误状态不会退回原始 JSON。
+后端 **50 passed**、组件 **6 passed**。这些组件也要到 Task 12 才挂入 `Pipeline.vue`。
+
 ### 全局业务投影 API
 
 以下既有接口已统一通过 `BusinessReadModel` 读取 AI 获客与 legacy 数据：

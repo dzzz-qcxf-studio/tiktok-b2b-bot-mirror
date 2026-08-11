@@ -2860,6 +2860,13 @@ async def list_acquisition_candidates(
     qualification_status: Optional[QualificationStatus] = Query(
         default=None, alias="qualificationStatus"
     ),
+    keyword_id: Optional[int] = Query(default=None, alias="keywordId", ge=1),
+    source_type: Optional[str] = Query(
+        default=None,
+        alias="sourceType",
+        min_length=1,
+        max_length=50,
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     database=Depends(get_pipeline_database),
@@ -2874,6 +2881,22 @@ async def list_acquisition_candidates(
         if qualification_status is not None:
             filters.append(
                 PipelineJobUser.qualification_status == qualification_status
+            )
+        if keyword_id is not None or source_type is not None:
+            evidence_filters = [
+                DiscoveryEvidence.job_id == job_id,
+                DiscoveryEvidence.user_id == PipelineJobUser.user_id,
+            ]
+            if keyword_id is not None:
+                evidence_filters.append(DiscoveryEvidence.keyword_id == keyword_id)
+            if source_type is not None:
+                evidence_filters.append(
+                    DiscoveryEvidence.source_type == source_type
+                )
+            filters.append(
+                select(DiscoveryEvidence.id)
+                .where(*evidence_filters)
+                .exists()
             )
         total = session.scalar(
             select(func.count(PipelineJobUser.user_id)).where(*filters)

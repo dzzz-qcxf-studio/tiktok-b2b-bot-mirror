@@ -589,6 +589,8 @@ export interface AcquisitionCandidate {
 export interface AcquisitionCandidateListParams {
   discoveryStatus?: CandidateDiscoveryStatus
   qualificationStatus?: CandidateQualificationStatus
+  keywordId?: number
+  sourceType?: string
   limit?: number
   offset?: number
 }

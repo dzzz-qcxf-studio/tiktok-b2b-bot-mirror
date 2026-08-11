@@ -1119,6 +1119,121 @@ async def test_candidate_from_another_job_is_not_disclosed(acquisition_api):
 
 
 @pytest.mark.asyncio
+async def test_candidate_list_filters_by_job_scoped_keyword_and_source_type(
+    acquisition_api,
+):
+    seed_job(acquisition_api, "job-1")
+    seed_job(acquisition_api, "job-2")
+    first_id = seed_candidate(acquisition_api, "job-1", "first")
+    second_id = seed_candidate(acquisition_api, "job-1", "second")
+    foreign_id = seed_candidate(acquisition_api, "job-2", "foreign")
+    store = AcquisitionStore()
+    with acquisition_api.session() as session:
+        store.create_campaign(session, job_id="job-1", platform="tiktok")
+        store.create_campaign(session, job_id="job-2", platform="tiktok")
+        first_keyword = store.create_keyword(
+            session,
+            job_id="job-1",
+            platform="tiktok",
+            text="transformer buyer",
+        )
+        foreign_keyword = store.create_keyword(
+            session,
+            job_id="job-2",
+            platform="tiktok",
+            text="foreign buyer",
+        )
+        first_keyword_id = first_keyword.id
+        foreign_keyword_id = foreign_keyword.id
+        store.add_evidence(
+            session,
+            job_id="job-1",
+            user_id=first_id,
+            keyword_id=first_keyword.id,
+            source_type="video_comment",
+            raw_text="first evidence",
+        )
+        store.add_evidence(
+            session,
+            job_id="job-1",
+            user_id=first_id,
+            keyword_id=first_keyword.id,
+            source_type="video_comment",
+            raw_text="duplicate matching path",
+        )
+        store.add_evidence(
+            session,
+            job_id="job-1",
+            user_id=second_id,
+            keyword_id=first_keyword.id,
+            source_type="author_profile",
+            raw_text="second evidence",
+        )
+        store.add_evidence(
+            session,
+            job_id="job-2",
+            user_id=foreign_id,
+            keyword_id=foreign_keyword.id,
+            source_type="video_comment",
+            raw_text="must stay isolated",
+        )
+
+    async with api_client() as client:
+        keyword_page = await client.get(
+            "/api/acquisition/jobs/job-1/candidates",
+            params={"keywordId": first_keyword_id, "limit": 1, "offset": 1},
+        )
+        combined = await client.get(
+            "/api/acquisition/jobs/job-1/candidates",
+            params={
+                "keywordId": first_keyword_id,
+                "sourceType": "video_comment",
+            },
+        )
+        foreign_keyword_page = await client.get(
+            "/api/acquisition/jobs/job-1/candidates",
+            params={"keywordId": foreign_keyword_id},
+        )
+
+    assert keyword_page.status_code == 200
+    assert keyword_page.json()["total"] == 2
+    assert [item["userId"] for item in keyword_page.json()["items"]] == [
+        first_id
+    ]
+    assert combined.status_code == 200
+    assert combined.json()["total"] == 1
+    assert [item["userId"] for item in combined.json()["items"]] == [first_id]
+    assert foreign_id not in {
+        item["userId"] for item in combined.json()["items"]
+    }
+    assert foreign_keyword_page.status_code == 200
+    assert foreign_keyword_page.json()["total"] == 0
+    assert foreign_keyword_page.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_candidate_list_rejects_invalid_business_drilldown_filters(
+    acquisition_api,
+):
+    seed_job(acquisition_api, "job-1")
+    async with api_client() as client:
+        invalid_keyword = await client.get(
+            "/api/acquisition/jobs/job-1/candidates?keywordId=0"
+        )
+        blank_source = await client.get(
+            "/api/acquisition/jobs/job-1/candidates?sourceType="
+        )
+        oversized_source = await client.get(
+            "/api/acquisition/jobs/job-1/candidates",
+            params={"sourceType": "x" * 51},
+        )
+
+    assert invalid_keyword.status_code == 422
+    assert blank_source.status_code == 422
+    assert oversized_source.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_candidate_detail_evidence_is_paginated_and_validates_bounds(
     acquisition_api,
 ):
