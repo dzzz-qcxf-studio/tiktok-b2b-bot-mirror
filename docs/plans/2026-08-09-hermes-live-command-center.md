@@ -323,6 +323,9 @@ git commit -m "feat: expose authenticated pipeline live controls"
 
 ### Task 12：Pipeline 页面集成
 
+> 实施状态：2026-08-11 已完成唯一监控实例、阶段业务卡、同 Job 复核抽屉和单一技术诊断集成；
+> 四组专项 53 passed、Smoke 142 passed，类型检查与生产构建通过，独立复审无 Critical/Important。
+
 **文件**
 
 - 修改：`tiktok_bot_console/ui/src/views/Pipeline.vue`

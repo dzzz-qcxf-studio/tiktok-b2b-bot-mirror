@@ -145,6 +145,12 @@
             </div>
           </div>
 
+          <HermesMissionMonitor
+            :key="selectedJob.id"
+            :job-id="selectedJob.id"
+            @open-review-workbench="checkpoint => openReviewWorkbench(selectedJob!.id, checkpoint)"
+          />
+
           <div class="detail-meta">
             <div>
               <span>{{ $t('pipeline.platform') }}</span>
@@ -206,16 +212,53 @@
                 <div v-if="stage.errorMessage" class="stage-error">
                   <code>{{ stage.errorMessage }}</code>
                 </div>
-                <details v-if="hasResult(stage.result)" class="stage-result">
-                  <summary>{{ $t('pipeline.stageResult') }}</summary>
-                  <pre>{{ formatResult(stage.result) }}</pre>
-                </details>
+                <StageDiscoveryResult
+                  v-if="isSelectedAcquisitionJob && stage.stage === 'collect'"
+                  :job-id="selectedJob.id"
+                  :stage-status="stage.status"
+                  :stage-result="stage.result"
+                  :legacy="false"
+                  :refresh-token="stageRefreshToken"
+                  @filter-candidates="filter => openCandidateReview(selectedJob!.id, filter)"
+                />
+                <StageQualificationResult
+                  v-else-if="isSelectedAcquisitionJob && stage.stage === 'filter'"
+                  :job-id="selectedJob.id"
+                  :stage-status="stage.status"
+                  :stage-result="stage.result"
+                  :legacy="false"
+                  :refresh-token="stageRefreshToken"
+                  @filter-candidates="filter => openCandidateReview(selectedJob!.id, filter)"
+                />
+                <p v-else-if="!isSelectedAcquisitionJob && hasResult(stage.result)" class="legacy-stage-summary">
+                  {{ formatLegacySummary(stage.result) }}
+                </p>
               </div>
             </article>
           </div>
+
+          <details v-if="diagnosticStages.length" class="technical-diagnostics">
+            <summary>{{ $t('pipeline.technicalDiagnostics') }}</summary>
+            <section v-for="stage in diagnosticStages" :key="stage.stage">
+              <h4>{{ $t(`pipeline.${stage.stage}`) }}</h4>
+              <pre>{{ formatResult(stage.result) }}</pre>
+            </section>
+          </details>
         </template>
       </section>
     </div>
+
+    <CandidateReviewDrawer
+      v-if="reviewDrawerJobId"
+      :key="reviewDrawerJobId"
+      :open="reviewDrawerOpen"
+      :job-id="reviewDrawerJobId"
+      :filter="reviewFilter"
+      :manual-checkpoint="reviewManualCheckpoint"
+      @close="closeReviewDrawer"
+      @candidate-updated="handleReviewDataChanged(reviewDrawerJobId)"
+      @review-complete="handleReviewComplete(reviewDrawerJobId)"
+    />
   </div>
 </template>
 
@@ -230,7 +273,9 @@ import {
   retryPipelineJob,
 } from '../api'
 import type {
+  AcquisitionCandidateListParams,
   CreateAcquisitionJobResponse,
+  PipelineDecisionCheckpoint,
   PipelineJob,
   PipelineJobStatus,
   PipelinePlatform,
@@ -238,6 +283,10 @@ import type {
   PipelineStageName,
 } from '../types/pipeline'
 import AcquisitionJobCreator from '../components/AcquisitionJobCreator.vue'
+import CandidateReviewDrawer from '../components/CandidateReviewDrawer.vue'
+import HermesMissionMonitor from '../components/HermesMissionMonitor.vue'
+import StageDiscoveryResult from '../components/StageDiscoveryResult.vue'
+import StageQualificationResult from '../components/StageQualificationResult.vue'
 
 interface SocialAccount {
   id: number
@@ -252,6 +301,7 @@ const ALL_STAGES: PipelineStageName[] = ['collect', 'filter', 'strategy', 'outre
 const JOB_STATUSES: PipelineJobStatus[] = [
   'queued',
   'running',
+  'waiting_decision',
   'cancelling',
   'succeeded',
   'partial_failed',
@@ -271,6 +321,11 @@ const selectedJob = ref<PipelineJob | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 const actionLoading = ref(false)
+const stageRefreshToken = ref(0)
+const reviewDrawerOpen = ref(false)
+const reviewDrawerJobId = ref('')
+const reviewFilter = ref<AcquisitionCandidateListParams>({})
+const reviewManualCheckpoint = ref<PipelineDecisionCheckpoint | null>(null)
 let pollTimer: number | null = null
 let historyRequestToken = 0
 let detailRequestToken = 0
@@ -278,13 +333,18 @@ let actionRequestToken = 0
 let pollInFlight = false
 
 const canCancel = computed(() =>
-  Boolean(selectedJob.value && ['queued', 'running'].includes(selectedJob.value.status)),
+  Boolean(selectedJob.value && ['queued', 'running', 'waiting_decision'].includes(selectedJob.value.status)),
 )
 const canRetry = computed(() =>
   Boolean(selectedJob.value && ['failed', 'partial_failed', 'interrupted'].includes(selectedJob.value.status)),
 )
 const historyFrom = computed(() => historyTotal.value === 0 ? 0 : historyOffset.value + 1)
 const historyTo = computed(() => Math.min(historyOffset.value + jobs.value.length, historyTotal.value))
+const isSelectedAcquisitionJob = computed(() => {
+  const snapshot = selectedJob.value?.configSnapshot ?? {}
+  return snapshot.businessMode === 'ai_acquisition'
+    || snapshot.creatorSource === 'pipeline_ui'
+})
 const detailStages = computed<PipelineStage[]>(() => {
   const byName = new Map((selectedJob.value?.stages || []).map(stage => [stage.stage, stage]))
   const requested = new Set(selectedJob.value?.requestedStages || [])
@@ -300,6 +360,7 @@ const detailStages = computed<PipelineStage[]>(() => {
     finishedAt: null,
   })
 })
+const diagnosticStages = computed(() => detailStages.value.filter(stage => hasResult(stage.result)))
 const stageProgressText = computed(() => {
   const completed = detailStages.value.filter(stage =>
     ['succeeded', 'failed', 'skipped', 'cancelled'].includes(stage.status),
@@ -334,6 +395,46 @@ async function handleAcquisitionCreated(response: CreateAcquisitionJobResponse) 
   await selectJob(response.job)
 }
 
+function closeReviewDrawer() {
+  reviewDrawerOpen.value = false
+  reviewDrawerJobId.value = ''
+  reviewFilter.value = {}
+  reviewManualCheckpoint.value = null
+}
+
+function openCandidateReview(jobId: string, filter: AcquisitionCandidateListParams) {
+  if (!isSelectedAcquisitionJob.value || selectedJobId.value !== jobId) return
+  reviewDrawerJobId.value = jobId
+  reviewFilter.value = { ...filter }
+  reviewManualCheckpoint.value = null
+  reviewDrawerOpen.value = true
+}
+
+function openReviewWorkbench(jobId: string, checkpoint: PipelineDecisionCheckpoint) {
+  if (
+    !isSelectedAcquisitionJob.value
+    || selectedJobId.value !== jobId
+    || checkpoint.jobId !== jobId
+  ) return
+  reviewDrawerJobId.value = jobId
+  reviewFilter.value = {}
+  reviewManualCheckpoint.value = checkpoint
+  reviewDrawerOpen.value = true
+}
+
+async function handleReviewDataChanged(jobId: string) {
+  if (!jobId || selectedJobId.value !== jobId) return
+  stageRefreshToken.value += 1
+  await refreshSelectedJobDetail()
+}
+
+async function handleReviewComplete(jobId: string) {
+  if (!jobId || selectedJobId.value !== jobId) return
+  closeReviewDrawer()
+  stageRefreshToken.value += 1
+  await refreshSelectedJobDetail()
+}
+
 async function refreshJobs(showLoading = true) {
   const requestToken = ++historyRequestToken
   const offsetSnapshot = historyOffset.value
@@ -362,6 +463,8 @@ async function refreshJobs(showLoading = true) {
 }
 
 async function selectJob(job: PipelineJob) {
+  closeReviewDrawer()
+  stageRefreshToken.value = 0
   selectedJobId.value = job.id
   selectedJob.value = job
   await loadJobDetail(job.id)
@@ -511,6 +614,15 @@ function hasResult(result: Record<string, unknown>) {
   return result && Object.keys(result).length > 0
 }
 
+function formatLegacySummary(result: Record<string, unknown>) {
+  return Object.entries(result).map(([key, value]) => {
+    if (value === null || value === undefined) return `${key}: —`
+    if (Array.isArray(value)) return `${key}: ${value.join(', ')}`
+    if (typeof value === 'object') return `${key}: ${Object.keys(value).length} fields`
+    return `${key}: ${String(value)}`
+  }).join(' · ')
+}
+
 function formatResult(result: Record<string, unknown>) {
   return JSON.stringify(result, null, 2)
 }
@@ -651,11 +763,20 @@ onUnmounted(() => {
 .stage-times { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 7px; color: var(--muted); font-family: var(--font-mono); font-size: 9.5px; }
 .stage-error { margin-top: 8px; padding: 8px; border-radius: 5px; background: var(--err-soft); color: var(--err); overflow-wrap: anywhere; }
 .stage-error code { font-family: var(--font-mono); font-size: 10.5px; }
-.stage-result { margin-top: 7px; color: var(--muted); font-size: 10.5px; }
-.stage-result summary { cursor: pointer; }
-.stage-result pre {
-  max-height: 180px; margin: 6px 0 0; padding: 9px; overflow: auto; border-radius: 5px;
-  background: oklch(14% .01 280); color: oklch(87% .006 280); font-size: 10px;
+.legacy-stage-summary {
+  margin-top: 9px !important; padding: 9px 11px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--bg-sub); overflow-wrap: anywhere;
+}
+.technical-diagnostics {
+  margin: 0 18px 18px; padding: 11px 13px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 10.5px;
+}
+.technical-diagnostics summary { min-height: 44px; cursor: pointer; line-height: 44px; }
+.technical-diagnostics section + section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.technical-diagnostics h4 { margin: 0; color: var(--fg-2); font-size: 11px; }
+.technical-diagnostics pre {
+  max-height: 220px; margin: 6px 0 0; padding: 9px; overflow: auto; border-radius: 5px;
+  background: var(--fg); color: var(--surface); font-family: var(--font-mono); font-size: 10px;
 }
 .state-panel {
   display: flex; min-height: 220px; padding: 30px; flex-direction: column; align-items: center;

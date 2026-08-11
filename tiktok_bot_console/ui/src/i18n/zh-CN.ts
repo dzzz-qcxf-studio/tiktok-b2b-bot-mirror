@@ -593,6 +593,7 @@ export default {
     finishedAt: '结束',
     attempt: '第 {n} 次尝试',
     stageResult: '查看阶段结果',
+    technicalDiagnostics: '技术诊断',
     jobStatus: {
       queued: '排队中',
       running: '运行中',

@@ -202,21 +202,27 @@ H4-C 只提供受认证的数据与控制通道；Pipeline 页面尚未嵌入 He
 本阶段验收证据：后端实时/API 相邻回归 **120 passed**，前端实时客户端 **13 passed**，前端
 Smoke **135 passed**；`vue-tsc`、Python 编译、`git diff --check` 与敏感信息扫描均通过。
 
-H4-D Task 9 已新增独立 `HermesMissionMonitor` 组件：单 Job live 首屏、唯一 SSE/历史恢复订阅、
+H4-D Task 9 已新增 `HermesMissionMonitor` 组件：单 Job live 首屏、唯一 SSE/历史恢复订阅、
 真实指标与有界事件回放、服务端 deadline 倒计时、人工 resolve/409 权威结果、人工工作台入口，
-以及收起/切 Job/卸载回收均有测试。专项 **14 passed**。该组件在 Task 12 前尚未挂载到
-`Pipeline.vue`，因此当前产品页面仍保持原详情界面，不能提前宣称作战窗口已经可见。
+以及收起/切 Job/卸载回收均有测试。专项 **14 passed**。Task 12 已将唯一 keyed 实例挂载到
+`Pipeline.vue`；页面自身不调用 SSE API，只保留既有 5 秒 Job 轮询。
 
 H4-D Task 10 已新增独立阶段 01/02 业务组件。阶段 01 调用 `stage-01 + keywords`，阶段 02 调用
 `stage-02`；候选列表额外接受 `keywordId/sourceType`，与既有发现/资格状态筛选可组合。组件点击
 只发出精确筛选对象，不自行猜测候选；legacy、失败、空、截断与错误状态不会退回原始 JSON。
-后端 **50 passed**、组件 **6 passed**。这些组件也要到 Task 12 才挂入 `Pipeline.vue`。
+后端 **50 passed**、组件 **6 passed**。Task 12 已把它们挂入 AI 获客 Job 的 collect/filter 阶段。
 
 H4-D Task 11 已新增独立 `CandidateReviewDrawer`。它使用候选列表、详情、证据分页和审计 API，
 并复用既有通过、淘汰、请求/完成补资料、标签更新与 `review-complete` 原子客户端。读取客户端新增
 可选 `AbortSignal`；切 Job、切候选、关闭和卸载不会让旧响应覆盖当前上下文。mutation 成功后会
 权威重读队列、详情和审计，重读失败不伪报成功。manual checkpoint 同时校验 Job、id、version
-和响应身份，旧请求不会锁住新关卡。专项 **12 passed**、类型检查通过；页面挂载仍归 Task 12。
+和响应身份，旧请求不会锁住新关卡。专项 **12 passed**、类型检查通过；Task 12 已将唯一抽屉接入
+阶段筛选和监控器人工关卡，并在切 Job 时关闭旧上下文。
+
+H4-D Task 12 的 `/pipeline` 集成使用 `businessMode=ai_acquisition` 识别当前快照，并兼容
+`creatorSource=pipeline_ui` 的历史创建器快照。AI 获客阶段默认显示业务卡；legacy 仍显示兼容摘要；
+原始 Stage result 仅存在于一个默认关闭的技术诊断折叠区。四组组件/页面专项 **53 passed**，
+Smoke **142 passed**，类型检查与生产构建通过。
 
 ### 全局业务投影 API
 

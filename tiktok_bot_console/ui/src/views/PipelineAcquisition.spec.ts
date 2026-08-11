@@ -555,7 +555,11 @@ describe('Pipeline acquisition creator integration', () => {
     const wrapper = mount(Pipeline, {
       global: {
         plugins: [i18n],
-        stubs: { AcquisitionJobCreator: CreatorStub },
+        stubs: {
+          AcquisitionJobCreator: CreatorStub,
+          CandidateReviewDrawer: true,
+          HermesMissionMonitor: true,
+        },
         mocks: { $router: { push: vi.fn() } },
       },
     })
@@ -580,5 +584,265 @@ describe('Pipeline acquisition creator integration', () => {
     expect(messages.success).toHaveBeenCalledOnce()
 
     wrapper.unmount()
+  })
+})
+
+describe('Pipeline Hermes acquisition command center integration', () => {
+  const checkpoint = {
+    id: 'checkpoint-review-1',
+    jobId: 'job-business-mode',
+    stage: 'filter',
+    kind: 'manual_review_session',
+    version: 3,
+    optionKeys: ['review_complete'],
+    defaultOptionKey: 'review_complete',
+    context: { schemaVersion: 1, manualSession: true },
+    status: 'pending',
+    deadlineAt: null,
+    resolvedAt: null,
+    resolutionKey: null,
+    resolutionSource: null,
+    createdAt: null,
+    updatedAt: null,
+  }
+
+  const CreatorStub = {
+    name: 'AcquisitionJobCreator',
+    emits: ['accountsLoaded', 'created'],
+    template: '<div data-testid="pipeline-acquisition-creator"></div>',
+  }
+  const MonitorStub = {
+    name: 'HermesMissionMonitor',
+    props: ['jobId'],
+    emits: ['open-review-workbench'],
+    data: () => ({ checkpoint }),
+    template: `
+      <section data-testid="hermes-monitor" :data-job-id="jobId">
+        <button data-testid="monitor-open-review" @click="$emit('open-review-workbench', checkpoint)">open</button>
+      </section>
+    `,
+  }
+  const DiscoveryStub = {
+    name: 'StageDiscoveryResult',
+    props: ['jobId', 'stageStatus', 'stageResult', 'legacy', 'refreshToken'],
+    emits: ['filter-candidates'],
+    template: `
+      <section data-testid="stage-discovery" :data-job-id="jobId" :data-refresh-token="refreshToken">
+        <button data-testid="discovery-filter" @click="$emit('filter-candidates', { sourceType: 'video_comment' })">filter</button>
+      </section>
+    `,
+  }
+  const QualificationStub = {
+    name: 'StageQualificationResult',
+    props: ['jobId', 'stageStatus', 'stageResult', 'legacy', 'refreshToken'],
+    emits: ['filter-candidates'],
+    template: `
+      <section data-testid="stage-qualification" :data-job-id="jobId" :data-refresh-token="refreshToken">
+        <button data-testid="qualification-filter" @click="$emit('filter-candidates', { qualificationStatus: 'manual_review' })">filter</button>
+      </section>
+    `,
+  }
+  const DrawerStub = {
+    name: 'CandidateReviewDrawer',
+    props: ['open', 'jobId', 'filter', 'manualCheckpoint'],
+    emits: ['close', 'candidate-updated', 'review-complete'],
+    template: `
+      <aside v-if="open" data-testid="candidate-review-drawer" :data-job-id="jobId">
+        <button data-testid="drawer-candidate-updated" @click="$emit('candidate-updated', 7)">updated</button>
+        <button data-testid="drawer-review-complete" @click="$emit('review-complete', { checkpointId: manualCheckpoint?.id })">complete</button>
+      </aside>
+    `,
+  }
+
+  function commandCenterJob(
+    id: string,
+    configSnapshot: Record<string, unknown>,
+    status: 'running' | 'waiting_decision' = 'running',
+  ) {
+    const response = createJobResponse({
+      platform: 'douyin',
+      accountMode: 'auto',
+      stages: ['collect', 'filter'],
+      configSnapshot,
+      campaign: {},
+      keywords: [],
+    }).data.job
+    return {
+      ...response,
+      id,
+      status,
+      currentStage: status === 'waiting_decision' ? 'filter' : 'collect',
+      configSnapshot,
+      stages: [
+        {
+          id: 1,
+          stage: 'collect',
+          order: 0,
+          status: 'succeeded',
+          attempt: 1,
+          result: { total_candidates: 8, diagnostic_code: 'collect-ok' },
+          errorMessage: '',
+          startedAt: '2026-08-11T08:00:00Z',
+          finishedAt: '2026-08-11T08:01:00Z',
+        },
+        {
+          id: 2,
+          stage: 'filter',
+          order: 1,
+          status: status === 'waiting_decision' ? 'waiting_decision' : 'running',
+          attempt: 1,
+          result: { manual_review: 3, diagnostic_code: 'filter-ok' },
+          errorMessage: '',
+          startedAt: '2026-08-11T08:01:00Z',
+          finishedAt: null,
+        },
+      ],
+    }
+  }
+
+  function mountCommandCenter(jobItems: ReturnType<typeof commandCenterJob>[]) {
+    api.listPipelineJobs.mockResolvedValue({
+      data: { items: jobItems, total: jobItems.length, limit: 10, offset: 0 },
+    })
+    api.getPipelineJob.mockImplementation((jobId: string) => Promise.resolve({
+      data: { job: jobItems.find(job => job.id === jobId) },
+    }))
+    api.cancelPipelineJob.mockImplementation((jobId: string) => Promise.resolve({
+      data: { job: { ...jobItems.find(job => job.id === jobId), status: 'cancelling' } },
+    }))
+    const i18n = createI18n({
+      legacy: false,
+      locale: 'zh-CN',
+      fallbackLocale: 'zh-CN',
+      messages: { 'zh-CN': zhCN, 'en-US': enUS },
+    })
+    return mount(Pipeline, {
+      global: {
+        plugins: [i18n],
+        stubs: {
+          AcquisitionJobCreator: CreatorStub,
+          HermesMissionMonitor: MonitorStub,
+          StageDiscoveryResult: DiscoveryStub,
+          StageQualificationResult: QualificationStub,
+          CandidateReviewDrawer: DrawerStub,
+        },
+        mocks: { $router: { push: vi.fn() } },
+      },
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('recognizes both acquisition snapshots, keys one monitor by Job, renders business stages, and cancels waiting decisions', async () => {
+    const businessModeJob = commandCenterJob(
+      'job-business-mode',
+      { businessMode: 'ai_acquisition' },
+      'waiting_decision',
+    )
+    const creatorSourceJob = commandCenterJob(
+      'job-creator-source',
+      { creatorSource: 'pipeline_ui' },
+    )
+    const wrapper = mountCommandCenter([businessModeJob, creatorSourceJob])
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="hermes-monitor"]')).toHaveLength(1)
+    const firstMonitor = wrapper.getComponent({ name: 'HermesMissionMonitor' })
+    const firstMonitorElement = firstMonitor.element
+    expect(firstMonitor.props('jobId')).toBe('job-business-mode')
+    expect(wrapper.find('[data-testid="stage-discovery"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stage-qualification"]').exists()).toBe(true)
+    expect(wrapper.find('.detail-actions .danger').exists()).toBe(true)
+    expect(wrapper.get('.detail-status-row .status-badge').classes()).toContain('warning')
+
+    await wrapper.findAll('.job-item')[1]!.trigger('click')
+    await flushPromises()
+    const secondMonitor = wrapper.getComponent({ name: 'HermesMissionMonitor' })
+    expect(secondMonitor.props('jobId')).toBe('job-creator-source')
+    expect(secondMonitor.element).not.toBe(firstMonitorElement)
+    expect(wrapper.findAll('[data-testid="hermes-monitor"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="stage-discovery"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps legacy stage summaries and moves all raw JSON into one closed diagnostic disclosure', async () => {
+    const legacyJob = commandCenterJob('job-legacy', {})
+    const wrapper = mountCommandCenter([legacyJob])
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="stage-discovery"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="stage-qualification"]').exists()).toBe(false)
+    expect(wrapper.findAll('.legacy-stage-summary')).toHaveLength(2)
+    expect(wrapper.get('.legacy-stage-summary').text()).toContain('total_candidates')
+    expect(wrapper.findAll('.stage-result')).toHaveLength(0)
+    const diagnostics = wrapper.findAll('details.technical-diagnostics')
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0]!.attributes('open')).toBeUndefined()
+    expect(diagnostics[0]!.text()).toContain('diagnostic_code')
+    wrapper.unmount()
+  })
+
+  it('opens one same-Job review drawer from stage filters and the monitor, then refreshes stage data', async () => {
+    const job = commandCenterJob('job-business-mode', { businessMode: 'ai_acquisition' })
+    const wrapper = mountCommandCenter([job])
+    await flushPromises()
+
+    await wrapper.get('[data-testid="discovery-filter"]').trigger('click')
+    let drawer = wrapper.getComponent({ name: 'CandidateReviewDrawer' })
+    expect(wrapper.findAll('[data-testid="candidate-review-drawer"]')).toHaveLength(1)
+    expect(drawer.props('jobId')).toBe('job-business-mode')
+    expect(drawer.props('filter')).toEqual({ sourceType: 'video_comment' })
+    expect(drawer.props('manualCheckpoint')).toBeNull()
+
+    await wrapper.get('[data-testid="monitor-open-review"]').trigger('click')
+    drawer = wrapper.getComponent({ name: 'CandidateReviewDrawer' })
+    expect(drawer.props('manualCheckpoint')).toMatchObject({ id: 'checkpoint-review-1', version: 3 })
+
+    const beforeRefresh = Number(wrapper.get('[data-testid="stage-discovery"]').attributes('data-refresh-token'))
+    const detailReadsBefore = api.getPipelineJob.mock.calls.length
+    await wrapper.get('[data-testid="drawer-candidate-updated"]').trigger('click')
+    await flushPromises()
+    expect(Number(wrapper.get('[data-testid="stage-discovery"]').attributes('data-refresh-token'))).toBe(beforeRefresh + 1)
+    expect(api.getPipelineJob.mock.calls.length).toBe(detailReadsBefore + 1)
+
+    await wrapper.get('[data-testid="drawer-review-complete"]').trigger('click')
+    await flushPromises()
+    expect(Number(wrapper.get('[data-testid="stage-discovery"]').attributes('data-refresh-token'))).toBe(beforeRefresh + 2)
+    wrapper.unmount()
+  })
+
+  it('closes the old drawer on Job switch and ignores late drawer events from the previous Job', async () => {
+    const first = commandCenterJob('job-business-mode', { businessMode: 'ai_acquisition' })
+    const second = commandCenterJob('job-creator-source', { creatorSource: 'pipeline_ui' })
+    const wrapper = mountCommandCenter([first, second])
+    await flushPromises()
+    await wrapper.get('[data-testid="discovery-filter"]').trigger('click')
+    const oldDrawer = wrapper.getComponent({ name: 'CandidateReviewDrawer' })
+
+    await wrapper.findAll('.job-item')[1]!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="candidate-review-drawer"]').exists()).toBe(false)
+    const detailReadsAfterSwitch = api.getPipelineJob.mock.calls.length
+    oldDrawer.vm.$emit('candidate-updated', 7)
+    await flushPromises()
+    expect(api.getPipelineJob.mock.calls.length).toBe(detailReadsAfterSwitch)
+    wrapper.unmount()
+  })
+
+  it('retains the five-second non-reentrant Job poll without adding a page-level live subscription', async () => {
+    vi.useFakeTimers()
+    const job = commandCenterJob('job-business-mode', { businessMode: 'ai_acquisition' })
+    const wrapper = mountCommandCenter([job])
+    await flushPromises()
+    const detailReadsBefore = api.getPipelineJob.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(api.getPipelineJob.mock.calls.length).toBeGreaterThan(detailReadsBefore)
+
+    wrapper.unmount()
+    vi.useRealTimers()
   })
 })

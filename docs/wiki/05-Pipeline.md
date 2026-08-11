@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-11（v0.7.2，候选复核工作台）
+> 最后更新: 2026-08-11（v0.7.3，Hermes 获客作战中心集成）
 
 ## 单一任务入口
 
@@ -202,9 +202,8 @@ H4-D Task 9 新增 `HermesMissionMonitor`。组件只消费上述安全 DTO，�
 不建立 SSE。收起、切换 Job、卸载都会 abort；展开重新读取 live，pending 决策事件会刷新完整
 checkpoint，旧关卡终态不会覆盖新的 active checkpoint。
 
-Task 9 专项回归 **14 passed**。当前组件尚未挂入 Pipeline 页面；阶段 01/02 业务卡和候选复核抽屉
-已分别由 Task 10—11 交付独立组件，唯一实例集成仍由 H4-D Task 12 完成，因此本提交点仍不能宣称
-页面已经可见作战窗口。
+Task 9 专项回归 **14 passed**。该组件及阶段 01/02 业务卡、候选复核抽屉现已由 H4-D Task 12
+以唯一实例挂入 Pipeline 页面，用户可以在同一任务详情内查看实时运行、处理关卡和复核候选。
 
 ### H4-D Task 10：阶段 01—02 业务结果
 
@@ -231,8 +230,23 @@ Task 10 验收：后端 Acquisition API **50 passed**，阶段组件 **6 passed*
 mutation 成功后必须重新读取队列、详情和审计，任一权威读取失败都不会发送成功事件，并会清除
 旧的可操作详情。切换 Job/候选、关闭或卸载会取消读取并使旧 generation 失效。显式人工会话只接受
 同 Job、pending 且匹配 id/version 的 manual checkpoint；同一 Job 的新 checkpoint 会立即解锁界面，
-旧响应不会解决或锁住新关卡。专项 **12 passed**、类型检查通过。该抽屉仍需 Task 12 挂载到
-`Pipeline.vue` 后才成为用户可见的完整流程。
+旧响应不会解决或锁住新关卡。专项 **12 passed**、类型检查通过。该抽屉现已由 Task 12 挂载到
+`Pipeline.vue`，并与阶段筛选和人工关卡共享同一 Job 上下文。
+
+### H4-D Task 12：Pipeline 页面集成
+
+选中 Job 后，详情顶部只挂载一个按 Job id keyed 的 `HermesMissionMonitor`。页面继续用既有 5 秒
+非重入轮询刷新 Job/Stage 权威状态，但不直接调用实时订阅 API，因此不会形成第二条 SSE。
+`waiting_decision` 使用 warning 状态并允许取消。
+
+AI 获客任务通过冻结快照的 `businessMode=ai_acquisition` 判定，并兼容既有
+`creatorSource=pipeline_ui` 快照。collect/filter 阶段分别显示发现与资格业务卡；卡片筛选和监控器
+发出的人工复核入口都只打开当前 Job 的唯一 `CandidateReviewDrawer`。候选 mutation 或人工会话
+完成后只刷新同一选中 Job；切 Job 会立即关闭旧抽屉，旧事件不能刷新新任务。
+
+legacy Job 继续显示兼容摘要。所有存在结果的 Stage 原始 JSON 只保留在一个默认关闭的“技术诊断”
+折叠区，不再分散在每个阶段主内容中。H4-D 四组专项 **53 passed**，Pipeline 集成专项 **21 passed**，
+Smoke **142 passed**，类型检查与生产构建通过；独立复审无 Critical/Important。
 
 ## 阶段执行流程
 

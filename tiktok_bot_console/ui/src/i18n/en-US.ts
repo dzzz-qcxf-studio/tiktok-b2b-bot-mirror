@@ -593,6 +593,7 @@ export default {
     finishedAt: 'Finished',
     attempt: 'Attempt {n}',
     stageResult: 'View stage result',
+    technicalDiagnostics: 'Technical diagnostics',
     jobStatus: {
       queued: 'Queued',
       running: 'Running',
