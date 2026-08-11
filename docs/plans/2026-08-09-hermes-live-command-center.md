@@ -261,6 +261,8 @@ git commit -m "feat: expose authenticated pipeline live controls"
 
 ### Task 9：HermesMissionMonitor 组件
 
+> 实施状态：2026-08-11 已完成独立组件与 14 项专项测试；Pipeline 页面挂载仍归 Task 12。
+
 **文件**
 
 - 新增：`tiktok_bot_console/ui/src/components/HermesMissionMonitor.vue`

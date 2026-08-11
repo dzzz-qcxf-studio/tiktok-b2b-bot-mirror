@@ -202,6 +202,11 @@ H4-C 只提供受认证的数据与控制通道；Pipeline 页面尚未嵌入 He
 本阶段验收证据：后端实时/API 相邻回归 **120 passed**，前端实时客户端 **13 passed**，前端
 Smoke **135 passed**；`vue-tsc`、Python 编译、`git diff --check` 与敏感信息扫描均通过。
 
+H4-D Task 9 已新增独立 `HermesMissionMonitor` 组件：单 Job live 首屏、唯一 SSE/历史恢复订阅、
+真实指标与有界事件回放、服务端 deadline 倒计时、人工 resolve/409 权威结果、人工工作台入口，
+以及收起/切 Job/卸载回收均有测试。专项 **14 passed**。该组件在 Task 12 前尚未挂载到
+`Pipeline.vue`，因此当前产品页面仍保持原详情界面，不能提前宣称作战窗口已经可见。
+
 ### 全局业务投影 API
 
 以下既有接口已统一通过 `BusinessReadModel` 读取 AI 获客与 legacy 数据：

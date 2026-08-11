@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-11（v0.6.8，Hermes/Browse Job 事件接线）
+> 最后更新: 2026-08-11（v0.7.0，Hermes 实时监控组件）
 
 ## 单一任务入口
 
@@ -190,8 +190,20 @@ checkpoint 事务提交后立即记录 pending，并在 human、timeout 或 canc
 不位于业务事务内，失败不会回滚状态机。
 Task 6 专项回归 **223 passed**；H4-A/Policy/Runtime、Acquisition 与 Browse E2E 相邻回归去重后 **133 passed**。
 
-当前仍未完成 H4-C Task 7 的受认证实时 API，也没有前端作战窗口。因此数据库已经有真实运行
-事件和决策审计，但现有页面尚不能显示实时事件、倒计时或提交关卡选择。
+### H4-C 实时 API 与 H4-D Task 9 监控组件
+
+H4-C 已提供受认证的 Job live 首屏、增量 history、SSE、active checkpoint、普通 resolve 和
+人工 review-complete。旧全局事件接口认证后固定 410，不再返回跨 Job 或原始 EventBus 数据；
+前端 token 只通过 Header 发送，SSE 断开后按 sequence 从持久 history 恢复。
+
+H4-D Task 9 新增 `HermesMissionMonitor`。组件只消费上述安全 DTO，展示真实阶段、行动、关键词、
+预算、指标和有界事件列表，不生成演示数据。普通关卡倒计时仅依据服务端 deadline，归零后等待
+权威 resolution；人工选择 pending 时防重复，409 使用数据库权威结果。终态任务直接进入回放，
+不建立 SSE。收起、切换 Job、卸载都会 abort；展开重新读取 live，pending 决策事件会刷新完整
+checkpoint，旧关卡终态不会覆盖新的 active checkpoint。
+
+Task 9 专项回归 **14 passed**。当前组件尚未挂入 Pipeline 页面；阶段 01/02 业务卡、候选复核抽屉
+和唯一实例集成仍由 H4-D Task 10—12 完成，因此本提交点仍不能宣称页面已经可见作战窗口。
 
 ## 阶段执行流程
 
