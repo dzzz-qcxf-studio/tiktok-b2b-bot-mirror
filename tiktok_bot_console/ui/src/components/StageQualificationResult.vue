@@ -133,22 +133,22 @@ watch(
 </script>
 
 <style scoped>
-.stage-business-card { margin-top: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.stage-business-card { margin-top: 12px; padding: 16px; border: 1px solid var(--border); border-radius: var(--card-radius); background: var(--surface); }
 .stage-business-card__header { margin-bottom: 14px; }
-.stage-business-card__header h4 { margin: 3px 0 0; color: var(--text); font-size: 15px; }
+.stage-business-card__header h4 { margin: 3px 0 0; color: var(--fg); font-size: 15px; }
 .stage-business-card__eyebrow { color: var(--brand); font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .metric-card, .status-card { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); text-align: left; }
 .metric-card span, .status-card span { display: block; color: var(--muted); font-size: 11px; }
-.metric-card strong, .status-card strong { display: block; margin-top: 4px; color: var(--text); font-family: var(--font-mono); font-size: 18px; }
+.metric-card strong, .status-card strong { display: block; margin-top: 4px; color: var(--fg); font-family: var(--font-mono); font-size: 18px; }
 .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
 .status-card { min-height: 58px; cursor: pointer; }
 .status-card:hover, .status-card:focus-visible { border-color: var(--brand); outline: none; }
-.status-card--qualified { border-left: 3px solid #22c55e; }
-.status-card--manual_review, .status-card--need_enrichment { border-left: 3px solid #f59e0b; }
-.status-card--rejected { border-left: 3px solid #ef4444; }
+.status-card--qualified { border-left: 3px solid var(--ok); }
+.status-card--manual_review, .status-card--need_enrichment { border-left: 3px solid var(--warn); }
+.status-card--rejected { border-left: 3px solid var(--err); }
 .stage-state { margin: 10px 0 0; padding: 12px; border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 12px; }
-.stage-state--error { background: rgba(239, 68, 68, .08); color: var(--danger); }
+.stage-state--error { background: var(--err-soft); color: var(--err); }
 @media (max-width: 720px) {
   .metric-grid, .status-grid { grid-template-columns: 1fr 1fr; }
 }
