@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, Optional
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Query, HTTPException, Depends, Request
+from fastapi import FastAPI, Query, HTTPException, Depends, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response
@@ -59,6 +59,12 @@ from tiktok_bot_core.services.pipeline_jobs import (
     PipelineJobService,
     PipelineRuntime,
 )
+from tiktok_bot_core.services.pipeline_decisions import (
+    DecisionGateConflictError,
+    DecisionGateError,
+    DecisionGateValidationError,
+    DecisionResolution,
+)
 from tiktok_bot_core.services.acquisition_jobs import (
     AcquisitionJobService,
     validate_acquisition_config_snapshot,
@@ -96,6 +102,16 @@ from tiktok_bot_core.storage.llm_store import (
     LLMWriteTransactionError,
 )
 from tiktok_bot_core.storage.sqlite_store import SqliteStore
+from tiktok_bot_api.pipeline_live import (
+    MAX_SEQUENCE,
+    PipelineActiveCheckpointResponse,
+    PipelineDecisionResolutionResponse,
+    PipelineEventHistoryResponse,
+    PipelineLiveEventResponse,
+    PipelineLiveReadService,
+    PipelineLiveResponse,
+    PipelineResolveResponse,
+)
 from tiktok_bot_core.settings import get_settings, reload_settings
 from tiktok_bot_core.events.bus import get_event_bus
 from tiktok_bot_api.auth import (
@@ -783,6 +799,7 @@ interactive_login_service = InteractiveLoginService(
 app.state.pipeline_runtime = pipeline_runtime
 app.state.pipeline_job_service = pipeline_runtime.job_service
 app.state.pipeline_database = db
+app.state.pipeline_decision_gate = pipeline_runtime.runner.decision_gate
 app.state.pipeline_runtime_disabled = False
 app.state.interactive_login_service = interactive_login_service
 app.state.interactive_login_chromium = interactive_login_chromium
@@ -804,6 +821,7 @@ PipelineStageName = Literal[
 PipelineJobStatus = Literal[
     "queued",
     "running",
+    "waiting_decision",
     "cancelling",
     "cancelled",
     "succeeded",
@@ -840,6 +858,22 @@ class PipelineJobRequest(ApiRequestModel):
 
 class PipelineRunRequest(PipelineJobRequest):
     """Legacy request accepted by /api/pipeline/run."""
+
+
+class PipelineResolveRequest(ApiRequestModel):
+    option_key: str = Field(
+        alias="optionKey",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    version: int = Field(strict=True, ge=1, le=2**31 - 1)
+    reason: str = Field(default="", max_length=500)
+
+
+class PipelineReviewCompleteRequest(ApiRequestModel):
+    version: int = Field(strict=True, ge=1, le=2**31 - 1)
+    reason: str = Field(default="", max_length=500)
 
 
 class PipelineScheduleRequest(PipelineJobRequest):
@@ -1367,6 +1401,36 @@ def get_pipeline_database(request: Request):
     return request.app.state.pipeline_database
 
 
+def get_pipeline_live_read_service(
+    request: Request,
+) -> PipelineLiveReadService:
+    return PipelineLiveReadService(request.app.state.pipeline_database)
+
+
+def get_pipeline_decision_gate(request: Request):
+    """Return the Runner-owned gate; API code must never mutate it directly."""
+
+    return request.app.state.pipeline_decision_gate
+
+
+async def require_pipeline_live_user(request: Request) -> str:
+    """Authenticate H4-C controls from headers only, never from URL tokens."""
+
+    username = None
+    authorization = request.headers.get("Authorization", "").strip()
+    if authorization:
+        scheme, separator, credential = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer" and credential.strip():
+            username = decode_token(credential.strip())
+    if username is None:
+        api_key = request.headers.get("X-API-Key", "").strip()
+        if api_key:
+            username = authenticate_apikey(api_key)
+    if username is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return username
+
+
 def get_acquisition_job_service(request: Request) -> AcquisitionJobService:
     return AcquisitionJobService(
         database=request.app.state.pipeline_database,
@@ -1862,6 +1926,303 @@ async def get_pipeline_job(
             detail=_error_detail("job_not_found", "Pipeline 任务不存在"),
         )
     return {"job": _serialize_pipeline_job(job)}
+
+
+def _pipeline_job_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail=_error_detail("job_not_found", "Pipeline 任务不存在"),
+    )
+
+
+def _pipeline_checkpoint_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail=_error_detail("checkpoint_not_found", "决策关卡不存在"),
+    )
+
+
+def _serialize_decision_resolution(
+    resolution: DecisionResolution,
+) -> dict[str, Any]:
+    return {
+        "checkpointId": resolution.checkpoint_id,
+        "jobId": resolution.job_id,
+        "stage": resolution.stage,
+        "kind": resolution.kind,
+        "optionKey": resolution.option_key,
+        "source": resolution.source,
+        "status": resolution.status,
+        "resolvedAt": resolution.resolved_at,
+        "deadlineAt": resolution.deadline_at,
+    }
+
+
+def _checkpoint_conflict_response(
+    resolution: DecisionResolution | None,
+) -> JSONResponse:
+    authoritative = (
+        PipelineDecisionResolutionResponse.model_validate(
+            _serialize_decision_resolution(resolution)
+        ).model_dump(mode="json", by_alias=True)
+        if resolution is not None
+        else None
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": {
+                "code": "checkpoint_conflict",
+                "message": "关卡状态已变化，请使用当前权威结果",
+                "resolution": authoritative,
+            }
+        },
+    )
+
+
+def _resolve_pipeline_checkpoint(
+    *,
+    job_id: str,
+    checkpoint_id: str,
+    option_key: str,
+    version: int,
+    reason: str,
+    operator: str,
+    live: PipelineLiveReadService,
+    gate,
+):
+    if not live.job_exists(job_id):
+        raise _pipeline_job_not_found()
+    checkpoint = live.checkpoint(job_id, checkpoint_id)
+    if checkpoint is None:
+        raise _pipeline_checkpoint_not_found()
+    if (
+        checkpoint["status"] == "pending"
+        and option_key not in checkpoint["optionKeys"]
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=_error_detail(
+                "invalid_checkpoint_option",
+                "关卡选项、版本或说明无效",
+            ),
+        )
+    try:
+        resolution = gate.resolve(
+            job_id=job_id,
+            checkpoint_id=checkpoint_id,
+            option_key=option_key,
+            version=version,
+            operator=operator,
+            reason=reason,
+        )
+    except DecisionGateValidationError:
+        raise HTTPException(
+            status_code=422,
+            detail=_error_detail(
+                "invalid_checkpoint_option",
+                "关卡选项、版本或说明无效",
+            ),
+        ) from None
+    except DecisionGateConflictError as exc:
+        return _checkpoint_conflict_response(exc.authoritative)
+    except DecisionGateError:
+        return _checkpoint_conflict_response(
+            gate.get_resolution(
+                job_id=job_id,
+                checkpoint_id=checkpoint_id,
+            )
+        )
+    return {
+        "resolution": _serialize_decision_resolution(resolution),
+    }
+
+
+@app.get(
+    "/api/pipeline/jobs/{job_id}/live",
+    response_model=PipelineLiveResponse,
+)
+async def get_pipeline_job_live(
+    job_id: str,
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    snapshot = live.snapshot(job_id)
+    if snapshot is None:
+        raise _pipeline_job_not_found()
+    return snapshot
+
+
+@app.get(
+    "/api/pipeline/jobs/{job_id}/events",
+    response_model=PipelineEventHistoryResponse,
+)
+async def get_pipeline_job_events(
+    job_id: str,
+    after_sequence: int = Query(
+        default=0,
+        alias="afterSequence",
+        ge=0,
+        le=MAX_SEQUENCE,
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    history = live.history(
+        job_id,
+        after_sequence=after_sequence,
+        limit=limit,
+    )
+    if history is None:
+        raise _pipeline_job_not_found()
+    return {
+        "items": history.items,
+        "lastSequence": history.last_sequence,
+    }
+
+
+@app.get(
+    "/api/pipeline/jobs/{job_id}/events/stream",
+)
+async def stream_pipeline_job_events(
+    request: Request,
+    job_id: str,
+    after_sequence: int = Query(
+        default=0,
+        alias="afterSequence",
+        ge=0,
+        le=MAX_SEQUENCE,
+    ),
+    last_event_id: str | None = Header(
+        default=None,
+        alias="Last-Event-ID",
+    ),
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    if not live.job_exists(job_id):
+        raise _pipeline_job_not_found()
+    header_cursor = 0
+    if last_event_id is not None:
+        try:
+            header_cursor = int(last_event_id)
+        except (TypeError, ValueError):
+            header_cursor = -1
+        if not 0 <= header_cursor <= MAX_SEQUENCE:
+            raise HTTPException(
+                status_code=422,
+                detail=_error_detail(
+                    "request_validation_error",
+                    "Last-Event-ID 无效",
+                ),
+            )
+    initial_cursor = max(after_sequence, header_cursor)
+
+    async def event_stream():
+        cursor = initial_cursor
+        while True:
+            if await request.is_disconnected():
+                return
+            history = live.history(
+                job_id,
+                after_sequence=cursor,
+                limit=100,
+            )
+            if history is None:
+                return
+            for item in history.items:
+                safe_item = PipelineLiveEventResponse.model_validate(
+                    item
+                ).model_dump(mode="json", by_alias=True)
+                cursor = safe_item["sequence"]
+                data = json.dumps(
+                    safe_item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                yield (
+                    f"id: {cursor}\n"
+                    "event: pipeline.event\n"
+                    f"data: {data}\n\n"
+                )
+            if history.terminal and not history.items:
+                return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get(
+    "/api/pipeline/jobs/{job_id}/checkpoints/active",
+    response_model=PipelineActiveCheckpointResponse,
+)
+async def get_active_pipeline_checkpoint(
+    job_id: str,
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    exists, checkpoint = live.active_checkpoint(job_id)
+    if not exists:
+        raise _pipeline_job_not_found()
+    return {"checkpoint": checkpoint}
+
+
+@app.post(
+    "/api/pipeline/jobs/{job_id}/checkpoints/{checkpoint_id}/resolve",
+    response_model=PipelineResolveResponse,
+    responses={409: {"description": "Checkpoint resolution conflict"}},
+)
+async def resolve_pipeline_checkpoint(
+    job_id: str,
+    checkpoint_id: str,
+    req: PipelineResolveRequest,
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    gate=Depends(get_pipeline_decision_gate),
+    current_user: str = Depends(require_pipeline_live_user),
+):
+    return _resolve_pipeline_checkpoint(
+        job_id=job_id,
+        checkpoint_id=checkpoint_id,
+        option_key=req.option_key,
+        version=req.version,
+        reason=req.reason,
+        operator=current_user,
+        live=live,
+        gate=gate,
+    )
+
+
+@app.post(
+    "/api/pipeline/jobs/{job_id}/checkpoints/{checkpoint_id}/review-complete",
+    response_model=PipelineResolveResponse,
+    responses={409: {"description": "Checkpoint resolution conflict"}},
+)
+async def complete_pipeline_review_checkpoint(
+    job_id: str,
+    checkpoint_id: str,
+    req: PipelineReviewCompleteRequest,
+    live: PipelineLiveReadService = Depends(get_pipeline_live_read_service),
+    gate=Depends(get_pipeline_decision_gate),
+    current_user: str = Depends(require_pipeline_live_user),
+):
+    return _resolve_pipeline_checkpoint(
+        job_id=job_id,
+        checkpoint_id=checkpoint_id,
+        option_key="review_complete",
+        version=req.version,
+        reason=req.reason,
+        operator=current_user,
+        live=live,
+        gate=gate,
+    )
 
 
 @app.post("/api/pipeline/jobs/{job_id}/cancel")
@@ -3149,9 +3510,22 @@ async def run_pipeline(
 
 
 @app.get("/api/pipeline/events")
-async def pipeline_events(limit: int = 50):
-    events = bus.history(limit=limit)
-    return [_format_event(e) for e in events]
+async def pipeline_events(
+    limit: int = 50,
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    """Deprecated global feed; Job-scoped durable events are authoritative."""
+
+    del limit
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": _error_detail(
+                "pipeline_global_events_deprecated",
+                "全局 Pipeline 事件接口已停用，请使用 Job 实时接口",
+            )
+        },
+    )
 
 
 def _format_event(e) -> dict:
@@ -3278,19 +3652,20 @@ async def pipeline_overview():
 
 
 @app.get("/api/pipeline/events/stream")
-async def pipeline_events_stream():
-    """SSE 实时事件流"""
-    async def event_stream():
-        last_count = len(bus.history())
-        while True:
-            await asyncio.sleep(2)
-            hist = bus.history()
-            if len(hist) > last_count:
-                for e in hist[last_count:]:
-                    yield f"data: {e.type.value} {e.payload}\n\n"
-                last_count = len(hist)
+async def pipeline_events_stream(
+    _current_user: str = Depends(require_pipeline_live_user),
+):
+    """Deprecated global stream; it must never expose cross-Job payloads."""
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": _error_detail(
+                "pipeline_global_events_deprecated",
+                "全局 Pipeline 事件接口已停用，请使用 Job 实时接口",
+            )
+        },
+    )
 
 
 # ===== Reports =====

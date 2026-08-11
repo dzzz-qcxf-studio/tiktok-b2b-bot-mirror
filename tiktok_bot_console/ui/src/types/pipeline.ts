@@ -13,6 +13,7 @@ export type PipelineStageName =
 export type PipelineJobStatus =
   | 'queued'
   | 'running'
+  | 'waiting_decision'
   | 'cancelling'
   | 'cancelled'
   | 'succeeded'
@@ -23,6 +24,7 @@ export type PipelineJobStatus =
 export type PipelineStageStatus =
   | 'pending'
   | 'running'
+  | 'waiting_decision'
   | 'succeeded'
   | 'failed'
   | 'skipped'
@@ -89,6 +91,183 @@ export interface PipelineJobListResponse {
   total: number
   limit: number
   offset: number
+}
+
+export type PipelineLiveEventLevel = 'debug' | 'info' | 'warning' | 'error'
+
+export type PipelineLiveEventType =
+  | 'job.lifecycle'
+  | 'stage.lifecycle'
+  | 'decision.lifecycle'
+  | 'candidate.lifecycle'
+  | 'browse.navigate'
+  | 'browse.click'
+  | 'browse.scroll'
+  | 'browse.wait'
+  | 'browse.extract'
+  | 'browse.done'
+  | 'browse.error'
+
+export type PipelineLivePayloadValue =
+  | string
+  | number
+  | boolean
+  | null
+  | PipelineLivePayloadValue[]
+  | { [key: string]: PipelineLivePayloadValue }
+
+export interface PipelineLiveEventPayload {
+  schemaVersion: number
+  [key: string]: PipelineLivePayloadValue
+}
+
+export interface PipelineLiveEvent {
+  sequence: number
+  jobId: string
+  stage: PipelineStageName | ''
+  eventType: PipelineLiveEventType
+  level: PipelineLiveEventLevel
+  payload: PipelineLiveEventPayload
+  createdAt: string | null
+}
+
+export interface PipelineLiveMetrics {
+  totalEvents: number
+  browserActions: number
+  videos: number
+  comments: number
+  candidates: number
+  evidence: number
+  llmCalls: number
+  remainingBudget: Record<string, number>
+}
+
+export type PipelineCheckpointStatus =
+  | 'pending'
+  | 'resolved'
+  | 'expired'
+  | 'cancelled'
+
+export type PipelineResolutionSource = 'human' | 'timeout' | 'system'
+
+export interface PipelineDecisionContext {
+  schemaVersion: number
+  title?: string
+  question?: string
+  summary?: string
+  metrics?: Record<string, number>
+  warnings?: string[]
+  candidateCounts?: Record<string, number>
+  remainingBudget?: Record<string, number>
+  defaultReason?: string
+  blockingReason?: string
+  manualSession?: boolean
+}
+
+export interface PipelineDecisionCheckpoint {
+  id: string
+  jobId: string
+  stage: PipelineStageName | ''
+  kind: string
+  version: number
+  optionKeys: string[]
+  defaultOptionKey: string
+  context: PipelineDecisionContext
+  status: PipelineCheckpointStatus
+  deadlineAt: string | null
+  resolvedAt: string | null
+  resolutionKey: string | null
+  resolutionSource: PipelineResolutionSource | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface PipelineDecisionResolution {
+  checkpointId: string
+  jobId: string
+  stage: PipelineStageName | ''
+  kind: string
+  optionKey: string | null
+  source: PipelineResolutionSource
+  status: Exclude<PipelineCheckpointStatus, 'pending'>
+  resolvedAt: string | null
+  deadlineAt: string | null
+}
+
+export interface ResolvePipelineCheckpointPayload {
+  optionKey: string
+  version: number
+  reason?: string
+}
+
+export interface ResolvePipelineCheckpointResponse {
+  resolution: PipelineDecisionResolution
+}
+
+export interface CompletePipelineReviewCheckpointPayload {
+  version: number
+  reason?: string
+}
+
+export interface PipelineLiveJobSummary {
+  id: string
+  platform: PipelinePlatform
+  status: PipelineJobStatus
+  currentStage: PipelineStageName | ''
+  requestedStages: PipelineStageName[]
+  startedAt: string | null
+  finishedAt: string | null
+  updatedAt: string | null
+}
+
+export interface PipelineLiveStageSummary {
+  stage: PipelineStageName
+  order: number
+  status: PipelineStageStatus
+  attempt: number
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export interface PipelineLiveResponse {
+  job: PipelineLiveJobSummary
+  stage: PipelineLiveStageSummary | null
+  metrics: PipelineLiveMetrics
+  recentEvents: PipelineLiveEvent[]
+  activeCheckpoint: PipelineDecisionCheckpoint | null
+  lastSequence: number
+}
+
+export interface PipelineLiveEventListParams {
+  afterSequence?: number
+  limit?: number
+}
+
+export interface PipelineLiveEventListResponse {
+  items: PipelineLiveEvent[]
+  lastSequence: number
+}
+
+export interface PipelineActiveCheckpointResponse {
+  checkpoint: PipelineDecisionCheckpoint | null
+}
+
+export type PipelineLiveTransport =
+  | 'connecting'
+  | 'streaming'
+  | 'polling'
+  | 'closed'
+
+export interface PipelineLiveSubscriptionOptions {
+  afterSequence?: number
+  onEvent: (event: PipelineLiveEvent) => void
+  onTransportChange?: (transport: PipelineLiveTransport) => void
+  onError?: (error: Error & { code?: string }) => void
+}
+
+export interface PipelineLiveSubscription {
+  readonly lastSequence: number
+  abort: () => void
 }
 
 export interface PipelinePlatformCapability {

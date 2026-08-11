@@ -81,7 +81,6 @@ const cases = [
   { name: 'getDashboard', fn: () => mockApi.getDashboard(), expect: d => d.overview && Array.isArray(d.keywords) && d.keywords.length > 0 && d.overview.today_reply_rate > 0 },
   { name: 'getUsers', fn: () => mockApi.getUsers({}), expect: d => Array.isArray(d.items) && d.items.length === d.total && d.total >= 10 },
   { name: 'getUsers[qualified]', fn: () => mockApi.getUsers({ status: 'qualified' }), expect: d => d.items.every(u => u.status === 'qualified') },
-  { name: 'getPipelineEvents', fn: () => mockApi.getPipelineEvents(50), expect: d => Array.isArray(d) && d.length > 0 && d[0].timestamp && d[0].type },
   { name: 'getTrendReport(30)', fn: () => mockApi.getTrendReport(30), expect: d => d.length === 30 && d[0].date && d[0].reply_rate >= 0 },
   { name: 'getDailyReport', fn: () => mockApi.getDailyReport(), expect: d => d.date && typeof d.reply_rate === 'number' },
   { name: 'getAccounts', fn: () => mockApi.getAccounts(), expect: d => Array.isArray(d) && d.length >= 3 && d[0] && d[0].platform && d[0].status },
@@ -418,6 +417,7 @@ if (!existsSync(pipelineTypesPath)) {
 }
 
 const apiSrc = readFileSync(join(root, 'src', 'api', 'index.ts'), 'utf8')
+const dashboardSrc = readFileSync(join(root, 'src', 'views', 'Dashboard.vue'), 'utf8')
 for (const method of [
   'createPipelineJob',
   'listPipelineJobs',
@@ -442,6 +442,26 @@ if (
   ok('runPipeline is a guarded createPipelineJob compatibility wrapper')
 } else {
   fail('runPipeline compatibility wrapper', 'must require selection and delegate to createPipelineJob')
+}
+
+if (
+  !apiSrc.includes('/api/pipeline/events')
+  && !apiSrc.includes('getPipelineEvents')
+  && !apiSrc.includes('streamPipelineEvents')
+) {
+  ok('real client exposes only Job-scoped durable pipeline events')
+} else {
+  fail('real client exposes only Job-scoped durable pipeline events', 'deprecated cross-Job event client is still exported')
+}
+
+if (
+  !dashboardSrc.includes('getPipelineEvents')
+  && !dashboardSrc.includes('/api/pipeline/events')
+  && dashboardSrc.includes('data-testid="dashboard-job-events-empty"')
+) {
+  ok('dashboard never guesses a Job for its event feed')
+} else {
+  fail('dashboard never guesses a Job for its event feed', 'Dashboard must use an explicit Job or render the empty state')
 }
 
 // ---------- 3b. Unified pipeline page contract ----------

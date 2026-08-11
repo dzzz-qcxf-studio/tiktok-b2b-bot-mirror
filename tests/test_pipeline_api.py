@@ -308,6 +308,27 @@ async def test_job_list_total_ignores_page_limit_and_offset(
 
 
 @pytest.mark.asyncio
+async def test_job_list_accepts_waiting_decision_status(
+    api_client,
+    isolated_pipeline_dependencies,
+):
+    isolated_pipeline_dependencies.jobs["job-waiting"] = make_job(
+        "job-waiting",
+        status="waiting_decision",
+    )
+
+    response = await api_client.get(
+        "/api/pipeline/jobs?status=waiting_decision"
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [
+        "job-waiting"
+    ]
+    assert response.json()["total"] == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_and_retry_pipeline_job(api_client):
     cancelled = await api_client.post("/api/pipeline/jobs/job-1/cancel")
     retried = await api_client.post("/api/pipeline/jobs/job-1/retry")

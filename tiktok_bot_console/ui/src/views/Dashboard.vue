@@ -152,9 +152,14 @@
         <router-link to="/pipeline" class="hint" style="color:var(--brand)">{{ $t('dashboard.viewFullPipeline') }} →</router-link>
       </div>
       <div class="feed">
-        <div v-for="(e, i) in feed" :key="i" class="feed-row">
-          <span class="feed-time">{{ e.time }}</span>
-          <span class="feed-text" v-html="e.text"></span>
+        <template v-if="feed.length">
+          <div v-for="(e, i) in feed" :key="i" class="feed-row">
+            <span class="feed-time">{{ e.time }}</span>
+            <span class="feed-text" v-html="e.text"></span>
+          </div>
+        </template>
+        <div v-else data-testid="dashboard-job-events-empty" class="feed-empty">
+          {{ $t('pipeline.historyEmpty') }}
         </div>
       </div>
     </div>
@@ -165,7 +170,7 @@
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
-import { getDashboard, getTrendReport, getDailyReport, getConfig, getPipelineEvents, getPipelineOverview, runPipeline } from '../api'
+import { getDashboard, getTrendReport, getDailyReport, getConfig, getPipelineOverview, runPipeline } from '../api'
 
 const { t } = useI18n()
 const loading = ref(true)
@@ -310,23 +315,11 @@ async function loadConfig() {
   } catch {}
 }
 
-async function loadFeed() {
-  try {
-    const { data } = await getPipelineEvents(5)
-    if (Array.isArray(data)) {
-      feed.value = data.map((e: any) => ({
-        time: String(e.timestamp || '').slice(11, 19),  // "12:04:18"
-        text: String(e.message || ''),
-      }))
-    }
-  } catch {}
-}
-
 watch(period, loadTrend)
 
 onMounted(async () => {
   try {
-    const [dash] = await Promise.all([getDashboard(), loadConfig(), loadTrend(), loadFeed(), loadOverview()])
+    const [dash] = await Promise.all([getDashboard(), loadConfig(), loadTrend(), loadOverview()])
     Object.assign(overview, dash.data.overview)
     topKeywords.value = (dash.data.keywords || []).slice(0, 5)
   } catch {}
@@ -393,4 +386,5 @@ onMounted(async () => {
 .feed-text { font-size: 13px; line-height: 1.5; }
 .feed-text :deep(b) { font-weight: 600; }
 .feed-text :deep(.who) { color: var(--brand); font-weight: 500; }
+.feed-empty { padding: 18px 0; color: var(--muted); font-size: 13px; text-align: center; }
 </style>

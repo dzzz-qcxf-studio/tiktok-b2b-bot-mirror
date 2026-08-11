@@ -247,7 +247,7 @@ git commit -m "feat: add automatic Hermes decision checkpoints"
 ```powershell
 python -X utf8 -m pytest tests/test_pipeline_live_api.py tests/test_acquisition_api.py -q
 Set-Location tiktok_bot_console/ui
-npm test -- --run src/api/pipelineLive.spec.ts
+npx vitest run src/api/pipelineLive.spec.ts
 npm run type-check
 ```
 

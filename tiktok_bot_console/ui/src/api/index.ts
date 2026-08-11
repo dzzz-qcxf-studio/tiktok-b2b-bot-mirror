@@ -20,6 +20,7 @@ import type {
   CandidateResponse,
   CandidateReviewAuditListResponse,
   CandidateReviewPayload,
+  CompletePipelineReviewCheckpointPayload,
   CreateAcquisitionJobPayload,
   CreateAcquisitionJobResponse,
   CreatePipelineJobPayload,
@@ -27,6 +28,16 @@ import type {
   PipelineJobListParams,
   PipelineJobListResponse,
   PipelineJobResponse,
+  PipelineLiveEvent,
+  PipelineLiveEventListParams,
+  PipelineLiveEventListResponse,
+  PipelineLiveResponse,
+  PipelineLiveSubscription,
+  PipelineLiveSubscriptionOptions,
+  PipelineLiveTransport,
+  PipelineActiveCheckpointResponse,
+  ResolvePipelineCheckpointPayload,
+  ResolvePipelineCheckpointResponse,
   PipelineScheduleListResponse,
   PipelineSchedulePayload,
   PipelineScheduleResponse,
@@ -128,10 +139,11 @@ export interface LoginSessionResponse {
  * without a page reload. */
 const isMock = isMockNow
 const ENV_MOCK = import.meta.env.VITE_USE_MOCK === 'true'
+const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 /** Raw axios instance — auth.ts / legacy callers use this directly. */
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE || 'http://localhost:8000',
+  baseURL: API_BASE_URL,
   timeout: 30000,
 })
 
@@ -209,7 +221,6 @@ const realApi = {
   getUserStats: () => api.get('/api/users/stats'),
 
   getDashboard: () => api.get('/api/stats/dashboard'),
-  getPipelineEvents: (limit = 60) => api.get('/api/pipeline/events', { params: { limit } }),
   getPipelineOverview: () => api.get('/api/pipeline/overview'),
   getUserDetail: (username: string) => api.get(`/api/users/${encodeURIComponent(username)}/detail`),
   createPipelineJob: (payload: CreatePipelineJobPayload) =>
@@ -220,6 +231,37 @@ const realApi = {
     api.get<PipelineJobListResponse>('/api/pipeline/jobs', { params }),
   getPipelineJob: (jobId: string) =>
     api.get<PipelineJobResponse>(`/api/pipeline/jobs/${encodeURIComponent(jobId)}`),
+  getPipelineLive: (jobId: string) =>
+    api.get<PipelineLiveResponse>(
+      `/api/pipeline/jobs/${encodeURIComponent(jobId)}/live`,
+    ),
+  getPipelineLiveEvents: (
+    jobId: string,
+    params: PipelineLiveEventListParams = {},
+  ) => api.get<PipelineLiveEventListResponse>(
+    `/api/pipeline/jobs/${encodeURIComponent(jobId)}/events`,
+    { params },
+  ),
+  getActivePipelineCheckpoint: (jobId: string) =>
+    api.get<PipelineActiveCheckpointResponse>(
+      `/api/pipeline/jobs/${encodeURIComponent(jobId)}/checkpoints/active`,
+    ),
+  resolvePipelineCheckpoint: (
+    jobId: string,
+    checkpointId: string,
+    payload: ResolvePipelineCheckpointPayload,
+  ) => api.post<ResolvePipelineCheckpointResponse>(
+    `/api/pipeline/jobs/${encodeURIComponent(jobId)}/checkpoints/${encodeURIComponent(checkpointId)}/resolve`,
+    payload,
+  ),
+  completePipelineReviewCheckpoint: (
+    jobId: string,
+    checkpointId: string,
+    payload: CompletePipelineReviewCheckpointPayload,
+  ) => api.post<ResolvePipelineCheckpointResponse>(
+    `/api/pipeline/jobs/${encodeURIComponent(jobId)}/checkpoints/${encodeURIComponent(checkpointId)}/review-complete`,
+    payload,
+  ),
   cancelPipelineJob: (jobId: string) =>
     api.post<PipelineJobResponse>(`/api/pipeline/jobs/${encodeURIComponent(jobId)}/cancel`),
   retryPipelineJob: (jobId: string) =>
@@ -346,8 +388,6 @@ const realApi = {
     ),
   deletePipelineSchedule: (scheduleId: number) =>
     api.delete<void>(`/api/pipeline/schedules/${scheduleId}`),
-  streamPipelineEvents: () => api.get('/api/pipeline/events/stream'),
-
   getDailyReport: (d?: string) => api.get('/api/reports/daily', { params: d ? { d } : {} }),
   getTrendReport: (days = 30) => api.get('/api/reports/trend', { params: { days } }),
   getWordcloud: (lang: 'en' | 'cn' = 'en', limit?: number) => api.get('/api/stats/wordcloud', { params: { lang, ...(typeof limit === 'number' ? { limit } : {}) } }),
@@ -415,6 +455,255 @@ const realApi = {
   searchLeads: (keyword: string, limit = 20) => api.get('/api/leads/search', { params: { keyword, limit } }),
 }
 
+const TERMINAL_PIPELINE_STATUSES = new Set([
+  'cancelled',
+  'succeeded',
+  'partial_failed',
+  'failed',
+  'interrupted',
+])
+
+function pipelineLiveTransportError(
+  code:
+    | 'pipeline_live_stream_unavailable'
+    | 'pipeline_live_history_unavailable'
+    | 'pipeline_live_subscriber_error',
+  message: string,
+) {
+  const error = new Error(message) as Error & { code: string }
+  error.code = code
+  return error
+}
+
+function isPipelineLiveEvent(
+  value: unknown,
+  expectedJobId: string,
+): value is PipelineLiveEvent {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<PipelineLiveEvent>
+  return Number.isSafeInteger(candidate.sequence)
+    && (candidate.sequence ?? 0) > 0
+    && candidate.jobId === expectedJobId
+    && typeof candidate.eventType === 'string'
+    && typeof candidate.level === 'string'
+    && !!candidate.payload
+    && typeof candidate.payload === 'object'
+}
+
+function isTerminalPipelineEvent(event: PipelineLiveEvent) {
+  return event.eventType === 'job.lifecycle'
+    && typeof event.payload.status === 'string'
+    && TERMINAL_PIPELINE_STATUSES.has(event.payload.status)
+}
+
+function buildPipelineLiveStreamUrl(jobId: string, afterSequence: number) {
+  const base = API_BASE_URL.replace(/\/+$/, '')
+  const path = `${base}/api/pipeline/jobs/${encodeURIComponent(jobId)}/events/stream`
+  const origin = typeof window === 'undefined'
+    ? 'http://localhost'
+    : window.location.origin
+  const url = new URL(path, origin)
+  if (afterSequence > 0) {
+    url.searchParams.set('afterSequence', String(afterSequence))
+  }
+  return url.toString()
+}
+
+/**
+ * Subscribe to one Job's authoritative event stream.
+ *
+ * A returned subscription owns exactly one fetch reader and, after a stream
+ * disconnect, one history-poll timer. Consumers must call abort when replacing
+ * the selected Job or unmounting. Terminal lifecycle events close it
+ * automatically.
+ */
+export function subscribePipelineLiveEvents(
+  jobId: string,
+  options: PipelineLiveSubscriptionOptions,
+): PipelineLiveSubscription {
+  const normalizedJobId = String(jobId)
+  let lastSequence = Math.max(0, Math.trunc(options.afterSequence ?? 0))
+  let stopped = false
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  let pollTimer: ReturnType<typeof setTimeout> | null = null
+  let transport: PipelineLiveTransport | null = null
+  const controller = new AbortController()
+
+  const setTransport = (next: PipelineLiveTransport) => {
+    if (transport === next) return
+    transport = next
+    try {
+      options.onTransportChange?.(next)
+    } catch {
+      // Consumer callbacks must never control the transport state machine.
+    }
+  }
+
+  const reportError = (
+    code:
+      | 'pipeline_live_stream_unavailable'
+      | 'pipeline_live_history_unavailable'
+      | 'pipeline_live_subscriber_error',
+    message: string,
+  ) => {
+    try {
+      options.onError?.(pipelineLiveTransportError(code, message))
+    } catch {
+      // Error observers are isolated for the same reason as event observers.
+    }
+  }
+
+  const abort = () => {
+    if (stopped) return
+    stopped = true
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer)
+      pollTimer = null
+    }
+    controller.abort()
+    if (reader) {
+      void reader.cancel().catch(() => undefined)
+    }
+    setTransport('closed')
+  }
+
+  const acceptEvent = (value: unknown) => {
+    if (stopped || !isPipelineLiveEvent(value, normalizedJobId)) return
+    if (value.sequence <= lastSequence) return
+    lastSequence = value.sequence
+    const terminal = isTerminalPipelineEvent(value)
+    try {
+      options.onEvent(value)
+    } catch {
+      reportError(
+        'pipeline_live_subscriber_error',
+        '实时事件处理暂时不可用',
+      )
+    } finally {
+      if (terminal) abort()
+    }
+  }
+
+  const pollOnce = async () => {
+    pollTimer = null
+    if (stopped) return
+    try {
+      const response = await api.get<PipelineLiveEventListResponse>(
+        `/api/pipeline/jobs/${encodeURIComponent(normalizedJobId)}/events`,
+        {
+          params: { afterSequence: lastSequence, limit: 100 },
+          signal: controller.signal,
+        },
+      )
+      for (const event of response.data.items) acceptEvent(event)
+    } catch {
+      if (!stopped) {
+        reportError(
+          'pipeline_live_history_unavailable',
+          '实时历史暂时不可用，正在继续重试',
+        )
+      }
+    }
+    if (!stopped) pollTimer = setTimeout(pollOnce, 1_000)
+  }
+
+  const startPolling = () => {
+    if (stopped || pollTimer !== null) return
+    setTransport('polling')
+    pollTimer = setTimeout(pollOnce, 1_000)
+  }
+
+  const handleSseFrame = (frame: string) => {
+    const dataLines = frame
+      .split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).replace(/^ /, ''))
+    if (!dataLines.length) return
+    try {
+      acceptEvent(JSON.parse(dataLines.join('\n')))
+    } catch {
+      // The durable history endpoint remains authoritative for malformed or
+      // partially delivered frames, so never surface raw server data here.
+    }
+  }
+
+  const consumeStream = async (response: Response) => {
+    if (!response.body) throw new Error('stream body unavailable')
+    reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      while (!stopped) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        buffer += decoder.decode(chunk.value, { stream: true })
+        let boundary = buffer.match(/\r?\n\r?\n/)
+        while (boundary?.index !== undefined) {
+          const frame = buffer.slice(0, boundary.index)
+          buffer = buffer.slice(boundary.index + boundary[0].length)
+          handleSseFrame(frame)
+          if (stopped) return
+          boundary = buffer.match(/\r?\n\r?\n/)
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock()
+      } catch {
+        // A concurrent abort may already have released the stream.
+      }
+      reader = null
+    }
+  }
+
+  const openStream = async () => {
+    setTransport('connecting')
+    const token = localStorage.getItem('token') || ''
+    const headers: Record<string, string> = { Accept: 'text/event-stream' }
+    if (token) headers.Authorization = `Bearer ${token}`
+    if (lastSequence > 0) headers['Last-Event-ID'] = String(lastSequence)
+    const requestUrl = buildPipelineLiveStreamUrl(normalizedJobId, lastSequence)
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        handleUnauthorizedResponse(
+          { status: response.status, requestUrl, requestToken: token },
+          router.currentRoute.value.fullPath,
+          (url) => { void router.replace(url) },
+        )
+        throw new Error('stream request rejected')
+      }
+      if (stopped) {
+        await response.body?.cancel().catch(() => undefined)
+        return
+      }
+      setTransport('streaming')
+      await consumeStream(response)
+    } catch {
+      if (!stopped) {
+        reportError(
+          'pipeline_live_stream_unavailable',
+          '实时连接暂时不可用，已切换到历史同步',
+        )
+      }
+    }
+    startPolling()
+  }
+
+  void openStream()
+
+  return {
+    get lastSequence() {
+      return lastSequence
+    },
+    abort,
+  }
+}
+
 // ---------- Exported wrapped API (used by views) ----------
 const wrapped = {
   // Runtime flag (read-only ref) — see useApiMode.ts
@@ -433,7 +722,6 @@ const wrapped = {
     withMockFallback(() => realApi.getUserDetail(username), () => mockApi.getUserDetail(username))
   ),
   getDashboard: pickMode(mockApi.getDashboard, withMockFallback(realApi.getDashboard, mockApi.getDashboard)),
-  getPipelineEvents: pickMode(mockApi.getPipelineEvents, withMockFallback(() => realApi.getPipelineEvents(60), () => mockApi.getPipelineEvents(60))),
   getPipelineOverview: pickMode(mockApi.getPipelineOverview, withMockFallback(realApi.getPipelineOverview, mockApi.getPipelineOverview)),
   getDailyReport: pickMode(mockApi.getDailyReport, withMockFallback(realApi.getDailyReport, mockApi.getDailyReport)),
   getTrendReport: pickMode(mockApi.getTrendReport, withMockFallback(() => realApi.getTrendReport(30), () => mockApi.getTrendReport(30))),
@@ -486,6 +774,11 @@ const wrapped = {
       () => mockApi.getPipelineJob(jobId),
     ),
   )(),
+  getPipelineLive: realApi.getPipelineLive,
+  getPipelineLiveEvents: realApi.getPipelineLiveEvents,
+  getActivePipelineCheckpoint: realApi.getActivePipelineCheckpoint,
+  resolvePipelineCheckpoint: realApi.resolvePipelineCheckpoint,
+  completePipelineReviewCheckpoint: realApi.completePipelineReviewCheckpoint,
   cancelPipelineJob: (jobId: string) => pickMode(
     () => mockApi.cancelPipelineJob(jobId),
     withMockFallback(
@@ -566,7 +859,6 @@ const wrapped = {
   getLoginStatus: pickMode(mockApi.getLoginStatus, realApi.getLoginStatus),
   getQrcodeUrl: realApi.getQrcodeUrl,
   checkAccountSession: pickMode(mockApi.checkAccountSession, realApi.checkAccountSession),
-  streamPipelineEvents: realApi.streamPipelineEvents,
   searchLeads: pickMode(mockApi.searchLeads, withMockFallback(() => realApi.searchLeads(''), () => mockApi.searchLeads(''))),
 }
 
@@ -583,12 +875,16 @@ export const getUsers = wrapped.getUsers
 export const getUserStats = wrapped.getUserStats
 export const getUserDetail = wrapped.getUserDetail
 export const getDashboard = wrapped.getDashboard
-export const getPipelineEvents = wrapped.getPipelineEvents
 export const getPipelineOverview = wrapped.getPipelineOverview
 export const createAcquisitionJob = wrapped.createAcquisitionJob
 export const createPipelineJob = wrapped.createPipelineJob
 export const listPipelineJobs = wrapped.listPipelineJobs
 export const getPipelineJob = wrapped.getPipelineJob
+export const getPipelineLive = wrapped.getPipelineLive
+export const getPipelineLiveEvents = wrapped.getPipelineLiveEvents
+export const getActivePipelineCheckpoint = wrapped.getActivePipelineCheckpoint
+export const resolvePipelineCheckpoint = wrapped.resolvePipelineCheckpoint
+export const completePipelineReviewCheckpoint = wrapped.completePipelineReviewCheckpoint
 export const cancelPipelineJob = wrapped.cancelPipelineJob
 export const retryPipelineJob = wrapped.retryPipelineJob
 export const getPipelineCapabilities = wrapped.getPipelineCapabilities
@@ -644,7 +940,6 @@ export const runPipeline = (
     stages: stages as PipelineStageName[],
   })
 }
-export const streamPipelineEvents = wrapped.streamPipelineEvents
 export const getDailyReport = wrapped.getDailyReport
 export const getTrendReport = wrapped.getTrendReport
 export const getWordcloud = wrapped.getWordcloud

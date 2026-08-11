@@ -1,7 +1,7 @@
 # 06 — CLI / API / UI 三层接口
 
 > 关联: [索引](00-索引.md) | [Pipeline](05-Pipeline.md) | [Skills](08-Skills.md)
-> 最后更新: 2026-08-09（Hermes H2 获客创建器）
+> 最后更新: 2026-08-11（Hermes H4-C 受认证实时 API 与前端客户端）
 
 ## 设计原则
 
@@ -34,7 +34,7 @@ tiktok-bot status
 tiktok-bot init
 ```
 
-## REST API 端点（73 个路由装饰器）
+## REST API 端点（79 个路由装饰器）
 
 ```text
 # 健康检查
@@ -71,8 +71,14 @@ GET    /api/pipeline/schedules               # 计划列表，可按 platform �
 PUT    /api/pipeline/schedules/{schedule_id} # 完整更新计划
 DELETE /api/pipeline/schedules/{schedule_id} # 删除计划，返回 204
 POST   /api/pipeline/run                     # 兼容入口：仅创建 Job，返回 202
-GET    /api/pipeline/events                  # 事件历史
-GET    /api/pipeline/events/stream           # SSE 实时事件流
+GET    /api/pipeline/jobs/{jobId}/live       # Job 实时首屏快照
+GET    /api/pipeline/jobs/{jobId}/events     # Job 增量事件；afterSequence/limit
+GET    /api/pipeline/jobs/{jobId}/events/stream # Job SSE；afterSequence + Last-Event-ID
+GET    /api/pipeline/jobs/{jobId}/checkpoints/active # 当前待决策关卡
+POST   /api/pipeline/jobs/{jobId}/checkpoints/{checkpointId}/resolve # 提交普通关卡选择
+POST   /api/pipeline/jobs/{jobId}/checkpoints/{checkpointId}/review-complete # 完成人工复核会话
+GET    /api/pipeline/events                  # deprecated；认证后固定 410，不返回全局事件
+GET    /api/pipeline/events/stream           # deprecated；认证后固定 410，不返回全局 SSE
 GET    /api/pipeline/overview                # Pipeline 总览（6 阶段 + 最近 7 天 + 摘要）
 
 # 获客阶段 01/02（全部需认证，资源严格绑定 jobId）
@@ -167,6 +173,34 @@ Mock 成功，也不会先调用 `/api/pipeline/jobs` 留下半成品任务。
 targetProfileConfigured` 三项无凭据元数据。提交成功后子组件发出完整服务端响应，父页面把
 历史 offset 重置为 0、刷新列表并选中新 Job；账号元数据通过事件合并，继续供详情账号标签
 使用。H2 没有新增第二套历史、轮询、取消或重试状态。
+
+### Hermes H4-C Job 实时与决策契约
+
+六个 Job-scoped 实时端点全部要求 JWT Bearer 或系统 API Key；未知 Job 返回 404，查询参数、
+`Last-Event-ID`、option、version 或 checkpoint/job 绑定无效时使用稳定的 422/409 响应。旧全局
+`/api/pipeline/events[/stream]` 已停用：匿名请求返回 401，认证后固定返回 410，不再读取进程内
+EventBus，也不会返回跨 Job 或原始 payload。
+
+`GET .../live` 在单个数据库 Session 内序列化为普通对象，返回严格 camelCase 的
+`job/stage/metrics/recentEvents/activeCheckpoint/lastSequence`；事件历史按全局稳定 sequence
+和 Job 双重过滤。SSE 每条使用 `id/event/data`，`data` 是同一安全事件 DTO；服务端取
+`afterSequence` 与 `Last-Event-ID` 的较大值继续读取，连接断开后不保留数据库 Session。
+
+普通关卡 resolve 与人工 `review-complete` 都调用 Runner 持有的同一 `DecisionGateService`，
+API 不直接更新 Job、Stage 或 checkpoint。human/timeout/cancel 竞争时，409 响应携带数据库里的
+权威 resolution；取消态 `optionKey` 可以为 `null`，人工长会话的 `deadlineAt` 为 `null`。
+
+前端原子客户端使用 Axios 获取 live/history/active/resolve/review-complete，并使用原生 Bearer
+`fetch` 订阅 SSE。token 只进入 `Authorization` Header，不进入 URL、日志或错误文本。SSE 支持
+分片解析、sequence 去重和断线后每 1 秒 history polling；切换 Job、组件卸载、显式 abort 或收到
+终态事件都会释放 reader、timer 和轮询请求。若初始 live 已是终态，H4-D 组件必须不启动订阅或
+立即 abort，不能仅凭空 SSE 猜测 Job 状态。
+
+H4-C 只提供受认证的数据与控制通道；Pipeline 页面尚未嵌入 Hermes 作战窗口，倒计时、事件列表、
+业务结果卡片和人工复核工作台属于 H4-D。
+
+本阶段验收证据：后端实时/API 相邻回归 **120 passed**，前端实时客户端 **13 passed**，前端
+Smoke **135 passed**；`vue-tsc`、Python 编译、`git diff --check` 与敏感信息扫描均通过。
 
 ### 全局业务投影 API
 

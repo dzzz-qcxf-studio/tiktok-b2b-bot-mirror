@@ -460,6 +460,7 @@ function statusClass(status: PipelineJobStatus) {
   const classes: Record<PipelineJobStatus, string> = {
     queued: 'neutral',
     running: 'active',
+    waiting_decision: 'warning',
     cancelling: 'warning',
     succeeded: 'success',
     partial_failed: 'warning',
