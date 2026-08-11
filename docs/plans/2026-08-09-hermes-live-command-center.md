@@ -305,6 +305,9 @@ git commit -m "feat: expose authenticated pipeline live controls"
 
 ### Task 11：候选复核抽屉
 
+> 实施状态：2026-08-11 已完成独立组件、12 项专项测试与 Critical/Important 复审修复；
+> Pipeline 页面挂载仍归 Task 12。
+
 **文件**
 
 - 新增：`tiktok_bot_console/ui/src/components/CandidateReviewDrawer.vue`

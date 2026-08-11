@@ -313,18 +313,20 @@ const realApi = {
   listAcquisitionCandidates: (
     jobId: string,
     params: AcquisitionCandidateListParams = {},
+    signal?: AbortSignal,
   ) => api.get<AcquisitionCandidateListResponse>(
     `/api/acquisition/jobs/${encodeURIComponent(jobId)}/candidates`,
-    { params },
+    { params, signal },
   ),
   getAcquisitionCandidate: (
     jobId: string,
     userId: number,
     params: AcquisitionPageParams = {},
+    signal?: AbortSignal,
   ) =>
     api.get<AcquisitionCandidateDetailResponse>(
       `/api/acquisition/jobs/${encodeURIComponent(jobId)}/candidates/${userId}`,
-      { params },
+      { params, signal },
     ),
   approveAcquisitionCandidate: (
     jobId: string,
@@ -370,10 +372,11 @@ const realApi = {
     jobId: string,
     userId: number,
     params: AcquisitionPageParams = {},
+    signal?: AbortSignal,
   ) =>
     api.get<CandidateReviewAuditListResponse>(
       `/api/acquisition/jobs/${encodeURIComponent(jobId)}/candidates/${userId}/audits`,
-      { params },
+      { params, signal },
     ),
   createPipelineSchedule: (payload: PipelineSchedulePayload) =>
     api.post<PipelineScheduleResponse>('/api/pipeline/schedules', payload),

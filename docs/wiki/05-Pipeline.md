@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-11（v0.7.1，阶段 01—02 业务结果组件）
+> 最后更新: 2026-08-11（v0.7.2，候选复核工作台）
 
 ## 单一任务入口
 
@@ -202,8 +202,9 @@ H4-D Task 9 新增 `HermesMissionMonitor`。组件只消费上述安全 DTO，�
 不建立 SSE。收起、切换 Job、卸载都会 abort；展开重新读取 live，pending 决策事件会刷新完整
 checkpoint，旧关卡终态不会覆盖新的 active checkpoint。
 
-Task 9 专项回归 **14 passed**。当前组件尚未挂入 Pipeline 页面；阶段 01/02 业务卡、候选复核抽屉
-和唯一实例集成仍由 H4-D Task 10—12 完成，因此本提交点仍不能宣称页面已经可见作战窗口。
+Task 9 专项回归 **14 passed**。当前组件尚未挂入 Pipeline 页面；阶段 01/02 业务卡和候选复核抽屉
+已分别由 Task 10—11 交付独立组件，唯一实例集成仍由 H4-D Task 12 完成，因此本提交点仍不能宣称
+页面已经可见作战窗口。
 
 ### H4-D Task 10：阶段 01—02 业务结果
 
@@ -219,7 +220,19 @@ Task 9 专项回归 **14 passed**。当前组件尚未挂入 Pipeline 页面；�
 对象，供 Task 12 在同一 Job 上下文中打开候选工作台。
 
 Task 10 验收：后端 Acquisition API **50 passed**，阶段组件 **6 passed**，类型检查、Python 编译
-和差异检查通过。候选复核抽屉及 Pipeline 页面集成仍待 Task 11—12。
+和差异检查通过。候选复核抽屉已由 Task 11 完成，Pipeline 页面集成仍待 Task 12。
+
+### H4-D Task 11：候选复核工作台
+
+`CandidateReviewDrawer` 严格绑定当前 Job，提供候选队列、独立证据/审计分页、公开主页与来源链、
+双评分、标签、缺失字段和四状态人工动作。`manual_review` 可以直接通过、淘汰或请求补资料，
+`need_enrichment` 可以完成补资料、通过或淘汰；`qualified/rejected` 为终态，界面不再提供修改动作。
+
+mutation 成功后必须重新读取队列、详情和审计，任一权威读取失败都不会发送成功事件，并会清除
+旧的可操作详情。切换 Job/候选、关闭或卸载会取消读取并使旧 generation 失效。显式人工会话只接受
+同 Job、pending 且匹配 id/version 的 manual checkpoint；同一 Job 的新 checkpoint 会立即解锁界面，
+旧响应不会解决或锁住新关卡。专项 **12 passed**、类型检查通过。该抽屉仍需 Task 12 挂载到
+`Pipeline.vue` 后才成为用户可见的完整流程。
 
 ## 阶段执行流程
 

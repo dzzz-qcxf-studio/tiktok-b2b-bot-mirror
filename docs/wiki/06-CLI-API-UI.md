@@ -212,6 +212,12 @@ H4-D Task 10 已新增独立阶段 01/02 业务组件。阶段 01 调用 `stage-
 只发出精确筛选对象，不自行猜测候选；legacy、失败、空、截断与错误状态不会退回原始 JSON。
 后端 **50 passed**、组件 **6 passed**。这些组件也要到 Task 12 才挂入 `Pipeline.vue`。
 
+H4-D Task 11 已新增独立 `CandidateReviewDrawer`。它使用候选列表、详情、证据分页和审计 API，
+并复用既有通过、淘汰、请求/完成补资料、标签更新与 `review-complete` 原子客户端。读取客户端新增
+可选 `AbortSignal`；切 Job、切候选、关闭和卸载不会让旧响应覆盖当前上下文。mutation 成功后会
+权威重读队列、详情和审计，重读失败不伪报成功。manual checkpoint 同时校验 Job、id、version
+和响应身份，旧请求不会锁住新关卡。专项 **12 passed**、类型检查通过；页面挂载仍归 Task 12。
+
 ### 全局业务投影 API
 
 以下既有接口已统一通过 `BusinessReadModel` 读取 AI 获客与 legacy 数据：
