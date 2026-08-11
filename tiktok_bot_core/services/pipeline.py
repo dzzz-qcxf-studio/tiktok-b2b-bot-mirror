@@ -56,6 +56,7 @@ class PipelineRunContext:
     account_id: int
     account_username: str
     browser_session: Any
+    event_recorder: Any | None = None
 
     def plugin_config(self) -> dict[str, Any]:
         return {
@@ -493,7 +494,11 @@ class PipelineService:
             "search_modes": list(plan.search_modes),
             "budget": budget.model_dump(exclude={"schema_version"}),
             "evidence_agent": HermesEvidenceAgent(
-                router=get_llm_client(), bus=self.bus
+                router=get_llm_client(),
+                bus=self.bus,
+                event_recorder=context.event_recorder,
+                job_id=context.job_id,
+                stage="collect",
             ),
             "collection_metrics": collection_metrics,
         }

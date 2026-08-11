@@ -923,14 +923,14 @@ class PipelineJobStore:
         self,
         session: Session,
         job_id: str,
-    ) -> int:
+    ) -> list[str]:
         """Mark stages not yet started as cancelled at a safe boundary."""
 
         validate_stage_transition(
             STAGE_STATUS_PENDING,
             STAGE_STATUS_CANCELLED,
         )
-        result = session.execute(
+        rows = session.execute(
             update(PipelineJobStage)
             .where(
                 PipelineJobStage.job_id == job_id,
@@ -940,24 +940,28 @@ class PipelineJobStore:
                 status=STAGE_STATUS_CANCELLED,
                 finished_at=datetime.utcnow(),
             )
+            .returning(
+                PipelineJobStage.stage,
+                PipelineJobStage.stage_order,
+            )
             .execution_options(synchronize_session=False)
-        )
+        ).all()
         session.flush()
         session.expire_all()
-        return int(result.rowcount or 0)
+        return [stage for stage, _order in sorted(rows, key=lambda row: row[1])]
 
     def skip_pending_stages(
         self,
         session: Session,
         job_id: str,
-    ) -> int:
+    ) -> list[str]:
         """Mark every not-yet-started stage skipped at a policy boundary."""
 
         validate_stage_transition(
             STAGE_STATUS_PENDING,
             STAGE_STATUS_SKIPPED,
         )
-        result = session.execute(
+        rows = session.execute(
             update(PipelineJobStage)
             .where(
                 PipelineJobStage.job_id == job_id,
@@ -967,11 +971,15 @@ class PipelineJobStore:
                 status=STAGE_STATUS_SKIPPED,
                 finished_at=datetime.utcnow(),
             )
+            .returning(
+                PipelineJobStage.stage,
+                PipelineJobStage.stage_order,
+            )
             .execution_options(synchronize_session=False)
-        )
+        ).all()
         session.flush()
         session.expire_all()
-        return int(result.rowcount or 0)
+        return [stage for stage, _order in sorted(rows, key=lambda row: row[1])]
 
     def recover_interrupted(self, session: Session) -> int:
         validate_stage_transition(STAGE_STATUS_RUNNING, STAGE_STATUS_FAILED)

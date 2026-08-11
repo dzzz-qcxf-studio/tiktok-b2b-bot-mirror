@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from threading import Lock
 from types import MappingProxyType
 from typing import Any
@@ -26,6 +27,8 @@ from tiktok_bot_core.storage.pipeline_live_store import (
 ContextBuilder = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 _CONTEXT_FIELDS = frozenset(
     {
@@ -202,6 +205,7 @@ class DecisionGateService:
         poll_interval_seconds: float = 0.1,
         clock: Clock = datetime.utcnow,
         sleeper: Sleeper = asyncio.sleep,
+        event_recorder: Any | None = None,
     ) -> None:
         for name, value in (
             ("timeout_seconds", timeout_seconds),
@@ -226,6 +230,7 @@ class DecisionGateService:
         )
         self._clock = clock
         self._sleeper = sleeper
+        self._event_recorder = event_recorder
         self._waiter_lock = Lock()
         self._waiters: dict[str, set[_Waiter]] = {}
 
@@ -354,6 +359,26 @@ class DecisionGateService:
                 return None
             return self._resolution(checkpoint)
 
+    def _record_decision(self, **payload: Any) -> None:
+        if self._event_recorder is None:
+            return
+        try:
+            self._event_recorder.record_decision(**payload)
+        except Exception:
+            logger.warning("Pipeline decision telemetry was skipped")
+
+    def _record_resolution(self, resolution: DecisionResolution) -> None:
+        self._record_decision(
+            job_id=resolution.job_id,
+            stage=resolution.stage,
+            checkpoint_id=resolution.checkpoint_id,
+            kind=resolution.kind,
+            status=resolution.status,
+            deadline_at=resolution.deadline_at,
+            resolution_key=resolution.option_key or "",
+            resolution_source=resolution.source,
+        )
+
     def _resolve_once(
         self,
         *,
@@ -403,6 +428,7 @@ class DecisionGateService:
                     checkpoint_id=checkpoint_id,
                 )
             ) from exc
+        self._record_resolution(resolution)
         self._notify(job_id)
         return resolution
 
@@ -468,10 +494,26 @@ class DecisionGateService:
 
     def cancel_job(self, job_id: str) -> JobCancellationResult | None:
         result: JobCancellationResult | None = None
+        cancelled_resolution: DecisionResolution | None = None
         with self._database.session() as session:
+            checkpoint = self._live_store.get_active_checkpoint(
+                session,
+                job_id=job_id,
+            )
+            checkpoint_id = checkpoint.id if checkpoint is not None else ""
             job = self._job_store.request_cancel(session, job_id)
             if job is not None:
                 result = JobCancellationResult(job_id=job.id, status=job.status)
+            if checkpoint_id:
+                cancelled = self._live_store.get_checkpoint(
+                    session,
+                    job_id=job_id,
+                    checkpoint_id=checkpoint_id,
+                )
+                if cancelled is not None:
+                    cancelled_resolution = self._resolution(cancelled)
+        if cancelled_resolution is not None:
+            self._record_resolution(cancelled_resolution)
         self._notify(job_id)
         return result
 
@@ -516,50 +558,66 @@ class DecisionGateService:
         cleanup_time = self._cleanup_timestamp()
         first_error: Exception | None = None
         try:
+            cancelled_resolution: DecisionResolution | None = None
+            cleanup_complete = False
             with self._database.session() as session:
-                self._live_store.cancel_checkpoint(
+                cancelled = self._live_store.cancel_checkpoint(
                     session,
                     job_id=job_id,
                     checkpoint_id=checkpoint_id,
                     reason="decision_waiter_cancelled",
                     resolved_at=cleanup_time,
                 )
+                if cancelled is not None:
+                    cancelled_resolution = self._resolution(cancelled)
                 if self._job_store.resume_from_decision(
                     session,
                     job_id,
                     stage,
                 ):
-                    return
-                job = self._job_store.get_job(session, job_id)
-                if (
-                    job is None
-                    or job.status != JOB_STATUS_WAITING_DECISION
-                ):
-                    return
+                    cleanup_complete = True
+                else:
+                    job = self._job_store.get_job(session, job_id)
+                    cleanup_complete = (
+                        job is None
+                        or job.status != JOB_STATUS_WAITING_DECISION
+                    )
+            if cancelled_resolution is not None:
+                self._record_resolution(cancelled_resolution)
+            if cleanup_complete:
+                return
         except Exception as exc:
             first_error = exc
 
         try:
+            cancelled_resolution = None
+            cleanup_complete = False
             with self._database.session() as session:
-                self._live_store.cancel_checkpoint(
+                cancelled = self._live_store.cancel_checkpoint(
                     session,
                     job_id=job_id,
                     checkpoint_id=checkpoint_id,
                     reason="decision_waiter_cancelled",
                     resolved_at=cleanup_time,
                 )
+                if cancelled is not None:
+                    cancelled_resolution = self._resolution(cancelled)
                 if self._job_store.interrupt_waiting_decision(
                     session,
                     job_id,
                     stage,
                 ):
-                    return
-                job = self._job_store.get_job(session, job_id)
-                if (
-                    job is None
-                    or job.status != JOB_STATUS_WAITING_DECISION
-                ):
-                    return
+                    cleanup_complete = True
+                else:
+                    job = self._job_store.get_job(session, job_id)
+                    cleanup_complete = (
+                        job is None
+                        or job.status != JOB_STATUS_WAITING_DECISION
+                    )
+            if cancelled_resolution is not None:
+                self._record_resolution(cancelled_resolution)
+            if cleanup_complete:
+                return
         except Exception as exc:
             if first_error is None:
                 first_error = exc
@@ -592,6 +650,7 @@ class DecisionGateService:
         )
         checkpoint_id = ""
         version = 0
+        pending_event: dict[str, Any] | None = None
         try:
             with self._database.session() as session:
                 checkpoint = self._live_store.create_checkpoint(
@@ -606,6 +665,17 @@ class DecisionGateService:
                 )
                 checkpoint_id = checkpoint.id
                 version = checkpoint.version
+                pending_event = {
+                    "job_id": job_id,
+                    "stage": stage,
+                    "checkpoint_id": checkpoint.id,
+                    "kind": definition.kind,
+                    "status": "pending",
+                    "default_option_key": selected_default,
+                    "deadline_at": (
+                        deadline if definition.auto_timeout else None
+                    ),
+                }
                 if not self._job_store.pause_for_decision(
                     session,
                     job_id,
@@ -618,6 +688,8 @@ class DecisionGateService:
             raise DecisionGateValidationError(
                 "decision checkpoint is invalid"
             ) from exc
+        if pending_event is not None:
+            self._record_decision(**pending_event)
 
         waiter = self._register_waiter(job_id)
         try:

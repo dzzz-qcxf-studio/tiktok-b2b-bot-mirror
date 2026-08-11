@@ -762,6 +762,34 @@ class PipelineLiveStore:
             or 0
         )
 
+    def list_checkpoint_events(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        checkpoint_id: str,
+    ) -> list[PipelineJobEvent]:
+        """Return persisted decision events for one checkpoint in sequence order."""
+
+        normalized_job_id = str(job_id or "").strip()
+        normalized_checkpoint_id = str(checkpoint_id or "").strip()
+        if not normalized_job_id or not normalized_checkpoint_id:
+            raise PipelineLiveValidationError(
+                "job_id and checkpoint_id must not be empty"
+            )
+        return list(
+            session.scalars(
+                select(PipelineJobEvent)
+                .where(
+                    PipelineJobEvent.job_id == normalized_job_id,
+                    PipelineJobEvent.event_type == "decision.lifecycle",
+                    PipelineJobEvent.payload_json["checkpointId"].as_string()
+                    == normalized_checkpoint_id,
+                )
+                .order_by(PipelineJobEvent.sequence.asc())
+            )
+        )
+
     def count_event_types(
         self,
         session: Session,

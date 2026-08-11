@@ -1987,6 +1987,23 @@ class _DecisionRunnerClock:
         await asyncio.sleep(0)
 
 
+class _CapturingRunnerRecorder:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.lifecycle_calls = []
+        self.stage_calls = []
+
+    def record_lifecycle(self, **kwargs):
+        self.lifecycle_calls.append(dict(kwargs))
+        if self.fail:
+            raise RuntimeError("telemetry unavailable")
+
+    def record_stage(self, **kwargs):
+        self.stage_calls.append(dict(kwargs))
+        if self.fail:
+            raise RuntimeError("telemetry unavailable")
+
+
 class _ScriptedDecisionGate:
     def __init__(
         self,
@@ -2105,6 +2122,96 @@ def _seed_decision_runner_job(
             account_id=account.id,
         )
         return job.id, account.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorder_fails", [False, True])
+async def test_runner_records_job_and_stage_lifecycle_fail_open(
+    db,
+    recorder_fails,
+):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect"],
+    )
+    provider = _DecisionRunnerProvider()
+    recorder = _CapturingRunnerRecorder(fail=recorder_fails)
+    pipeline = _DecisionRunnerPipeline(
+        {"collect": [{"status": "ok", "result": {"candidate": 1}}]}
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+        event_recorder=recorder,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "succeeded"
+        assert job.stages[0].status == "succeeded"
+    assert provider.released == [account_id]
+    assert [call["status"] for call in recorder.lifecycle_calls] == [
+        "running",
+        "succeeded",
+    ]
+    assert [call["status"] for call in recorder.stage_calls] == [
+        "running",
+        "succeeded",
+    ]
+    assert all(
+        call["job_id"] == job_id
+        for call in recorder.lifecycle_calls + recorder.stage_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_persists_job_and_stage_lifecycle_with_real_recorder(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_live_store import PipelineLiveStore
+
+    job_id, _account_id = _seed_decision_runner_job(
+        db,
+        stages=["collect"],
+    )
+    provider = _DecisionRunnerProvider()
+    pipeline = _DecisionRunnerPipeline(
+        {"collect": [{"status": "ok", "result": {"candidate": 1}}]}
+    )
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry({"douyin": provider}),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: pipeline,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        events = [
+            (event.event_type, event.stage, event.payload_json["status"])
+            for event in PipelineLiveStore().list_events(session, job_id=job_id)
+        ]
+    assert events == [
+        ("job.lifecycle", "", "running"),
+        ("stage.lifecycle", "collect", "running"),
+        ("stage.lifecycle", "collect", "succeeded"),
+        ("job.lifecycle", "", "succeeded"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2265,6 +2372,7 @@ async def test_collect_control_actions_have_deterministic_terminal_states(
     )
     provider = _DecisionRunnerProvider()
     gate = _ScriptedDecisionGate(db, [option])
+    recorder = _CapturingRunnerRecorder()
     pipeline = _DecisionRunnerPipeline(
         {
             "collect": [
@@ -2281,6 +2389,7 @@ async def test_collect_control_actions_have_deterministic_terminal_states(
         concurrency=PipelineConcurrencyManager(douyin_limit=1),
         pipeline_factory=lambda: pipeline,
         decision_gate=gate,
+        event_recorder=recorder,
     )
 
     await runner.run_job(job_id)
@@ -2290,6 +2399,245 @@ async def test_collect_control_actions_have_deterministic_terminal_states(
         assert job.status == expected_job_status
         assert [stage.status for stage in job.stages] == expected_stage_statuses
     assert pipeline.calls == ["collect"]
+    assert [
+        (call["stage"], call["status"])
+        for call in recorder.stage_calls
+    ] == (
+        [
+            ("collect", "running"),
+            ("collect", "succeeded"),
+            ("filter", "skipped"),
+            ("outreach", "skipped"),
+        ]
+        if option == "skip_remaining_pipeline"
+        else [
+            ("collect", "running"),
+            ("collect", "cancelled"),
+            ("filter", "cancelled"),
+            ("outreach", "cancelled"),
+        ]
+    )
+    assert recorder.lifecycle_calls[-1]["status"] == expected_job_status
+    assert recorder.stage_calls[-1]["status"] == expected_stage_statuses[-1]
+
+
+@pytest.mark.asyncio
+async def test_stop_job_records_all_affected_stages_before_job_terminal(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "report"],
+    )
+    recorder = _CapturingRunnerRecorder()
+    runner = PipelineJobRunner(
+        database=db,
+        providers=BrowserProviderRegistry(
+            {"douyin": _DecisionRunnerProvider()}
+        ),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: _DecisionRunnerPipeline(
+            {
+                "collect": [
+                    {
+                        "status": "error",
+                        "result": {
+                            "errorCode": "authentication_required",
+                            "error": "private diagnostic",
+                        },
+                    }
+                ]
+            }
+        ),
+        decision_gate=_ScriptedDecisionGate(db, ["stop_job"]),
+        event_recorder=recorder,
+    )
+
+    await runner.run_job(job_id)
+
+    assert [
+        (call["stage"], call["status"])
+        for call in recorder.stage_calls
+    ] == [
+        ("collect", "running"),
+        ("collect", "failed"),
+        ("report", "skipped"),
+    ]
+    assert recorder.lifecycle_calls[-1]["status"] == "failed"
+
+
+def test_bulk_stage_updates_return_only_real_affected_stage_names(db):
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "filter", "outreach"],
+    )
+    store = PipelineJobStore()
+    with db.session() as session:
+        skipped = store.skip_pending_stages(session, job_id)
+    with db.session() as session:
+        cancelled = store.cancel_pending_stages(session, job_id)
+
+    assert skipped == ["collect", "filter", "outreach"]
+    assert cancelled == []
+
+
+def test_finish_cancellation_does_not_emit_terminal_when_cas_did_not_change(db):
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, _ = _seed_decision_runner_job(db, stages=["collect"])
+    with db.session() as session:
+        store = PipelineJobStore()
+        assert store.request_cancel(session, job_id).status == "cancelling"
+        store.cancel_pending_stages(session, job_id)
+        assert store.set_job_status(
+            session,
+            job_id,
+            "cancelled",
+            expected_statuses={"cancelling"},
+            finished_at=datetime.utcnow(),
+        )
+    recorder = _CapturingRunnerRecorder()
+    runner = PipelineJobRunner(database=db, event_recorder=recorder)
+
+    runner._finish_cancellation(job_id)
+
+    assert recorder.lifecycle_calls == []
+    assert recorder.stage_calls == []
+
+
+class _RejectingTerminalStatusStore:
+    def __init__(self, rejected_status):
+        from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+        self._delegate = PipelineJobStore()
+        self.rejected_status = rejected_status
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    def set_job_status(self, session, job_id, new_status, **kwargs):
+        if new_status == self.rejected_status:
+            return False
+        return self._delegate.set_job_status(
+            session,
+            job_id,
+            new_status,
+            **kwargs,
+        )
+
+
+@pytest.mark.asyncio
+async def test_stop_job_cas_failure_rolls_back_all_stage_changes(db):
+    from tiktok_bot_core.browser.providers import BrowserProviderRegistry
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_concurrency import (
+        PipelineConcurrencyManager,
+    )
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "report"],
+    )
+    recorder = _CapturingRunnerRecorder()
+    runner = PipelineJobRunner(
+        database=db,
+        store=_RejectingTerminalStatusStore("failed"),
+        providers=BrowserProviderRegistry(
+            {"douyin": _DecisionRunnerProvider()}
+        ),
+        concurrency=PipelineConcurrencyManager(douyin_limit=1),
+        pipeline_factory=lambda: _DecisionRunnerPipeline(
+            {
+                "collect": [
+                    {
+                        "status": "error",
+                        "result": {"errorCode": "authentication_required"},
+                    }
+                ]
+            }
+        ),
+        decision_gate=_ScriptedDecisionGate(db, ["stop_job"]),
+        event_recorder=recorder,
+    )
+
+    await runner.run_job(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "running"
+        assert [stage.status for stage in job.stages] == ["running", "pending"]
+    assert [call["status"] for call in recorder.stage_calls] == ["running"]
+    assert [call["status"] for call in recorder.lifecycle_calls] == ["running"]
+
+
+def test_finish_cancellation_cas_failure_rolls_back_all_stage_changes(db):
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "report"],
+    )
+    with db.session() as session:
+        store = PipelineJobStore()
+        assert store.start_stage(session, job_id, "collect") is not None
+        assert store.request_cancel(session, job_id).status == "cancelling"
+    recorder = _CapturingRunnerRecorder()
+    runner = PipelineJobRunner(
+        database=db,
+        store=_RejectingTerminalStatusStore("cancelled"),
+        event_recorder=recorder,
+    )
+
+    runner._finish_cancellation(job_id)
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "cancelling"
+        assert [stage.status for stage in job.stages] == ["running", "pending"]
+    assert recorder.stage_calls == []
+    assert recorder.lifecycle_calls == []
+
+
+def test_finish_internal_error_cas_failure_rolls_back_all_stage_changes(db):
+    from tiktok_bot_core.models.entities import PipelineJob
+    from tiktok_bot_core.services.pipeline_jobs import PipelineJobRunner
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+
+    job_id, _ = _seed_decision_runner_job(
+        db,
+        stages=["collect", "report"],
+    )
+    with db.session() as session:
+        assert PipelineJobStore().start_stage(
+            session,
+            job_id,
+            "collect",
+        ) is not None
+    recorder = _CapturingRunnerRecorder()
+    runner = PipelineJobRunner(
+        database=db,
+        store=_RejectingTerminalStatusStore("failed"),
+        event_recorder=recorder,
+    )
+
+    runner._finish_internal_error(job_id, RuntimeError("internal failure"))
+
+    with db.session() as session:
+        job = session.get(PipelineJob, job_id)
+        assert job.status == "running"
+        assert [stage.status for stage in job.stages] == ["running", "pending"]
+    assert recorder.stage_calls == []
+    assert recorder.lifecycle_calls == []
 
 
 @pytest.mark.asyncio

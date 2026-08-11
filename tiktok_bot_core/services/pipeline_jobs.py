@@ -46,6 +46,9 @@ from tiktok_bot_core.services.pipeline_decision_policy import (
     PipelineDecisionPolicy,
 )
 from tiktok_bot_core.services.pipeline_decisions import DecisionGateService
+from tiktok_bot_core.services.pipeline_live_events import (
+    PipelineLiveEventRecorder,
+)
 from tiktok_bot_core.services.pipeline_concurrency import (
     ConcurrencyLease,
     PipelineConcurrencyManager,
@@ -53,6 +56,7 @@ from tiktok_bot_core.services.pipeline_concurrency import (
 from tiktok_bot_core.storage.database import Database, get_db
 from tiktok_bot_core.storage.acquisition_store import AcquisitionStore
 from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+from tiktok_bot_core.storage.pipeline_live_store import PUBLIC_ERROR_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,10 @@ class PipelineJobError(RuntimeError):
 
 class _RunnerCancellationRequested(RuntimeError):
     """Internal control flow for a durable Job cancellation request."""
+
+
+class _TerminalTransitionConflict(RuntimeError):
+    """Roll back Stage changes when the matching Job CAS did not commit."""
 
 
 class PipelineJobService:
@@ -463,18 +471,25 @@ class PipelineJobRunner:
         pipeline_factory: Callable[[], PipelineService] = PipelineService,
         decision_policy: PipelineDecisionPolicy | None = None,
         decision_gate: DecisionGateService | None = None,
+        event_recorder: Any | None = None,
     ) -> None:
         self.database = database or get_db()
         self.store = store or PipelineJobStore()
         self.providers = providers or BrowserProviderRegistry()
         self.concurrency = concurrency or PipelineConcurrencyManager()
         self.pipeline_factory = pipeline_factory
+        self.event_recorder = (
+            event_recorder
+            if event_recorder is not None
+            else PipelineLiveEventRecorder(self.database)
+        )
         self.decision_policy = decision_policy or PipelineDecisionPolicy(
             self.database
         )
         self.decision_gate = decision_gate or DecisionGateService(
             self.database,
             job_store=self.store,
+            event_recorder=self.event_recorder,
         )
         # If browser cleanup cannot be confirmed, retain both handles and the
         # active account lease as an explicit in-process quarantine.  Opening a
@@ -647,6 +662,7 @@ class PipelineJobRunner:
                 account_id=account.id,
                 account_username=account.username,
                 browser_session=browser_session,
+                event_recorder=self.event_recorder,
             )
             # Never reuse a PipelineService that still references work done
             # with the released BrowserSession.
@@ -693,6 +709,11 @@ class PipelineJobRunner:
             if account is None:
                 self._finish_cancellation(job_id)
                 return
+            self._record_lifecycle(
+                job_id=job_id,
+                status=JOB_STATUS_RUNNING,
+                previous_status=JOB_STATUS_QUEUED,
+            )
             if owned_lease is None:
                 owned_lease = await self.concurrency.acquire(
                     account.platform,
@@ -706,6 +727,7 @@ class PipelineJobRunner:
                 account_id=account.id,
                 account_username=account.username,
                 browser_session=browser_session,
+                event_recorder=self.event_recorder,
             )
             pipeline = self.pipeline_factory()
             failed_stages: list[str] = []
@@ -721,6 +743,14 @@ class PipelineJobRunner:
                         raise RuntimeError(
                             f"Could not start pipeline stage: {stage}"
                         )
+                    started_attempt = started.attempt
+                self._record_stage(
+                    job_id=job_id,
+                    stage=stage,
+                    status=STAGE_STATUS_RUNNING,
+                    previous_status="pending",
+                    attempt=started_attempt,
+                )
 
                 if stage == "outreach":
                     outreach_action = "execute_approved_outreach"
@@ -753,6 +783,12 @@ class PipelineJobRunner:
                                 raise RuntimeError(
                                     "Could not skip pipeline outreach stage"
                                 )
+                            self._record_stage(
+                                job_id=job_id,
+                                stage=stage,
+                                status=STAGE_STATUS_SKIPPED,
+                                previous_status=STAGE_STATUS_RUNNING,
+                            )
                             break
                         if outreach_action == "execute_approved_outreach":
                             break
@@ -824,10 +860,35 @@ class PipelineJobRunner:
                                 job_id,
                                 stage,
                             )
+                            failed_attempt_number = (
+                                failed_attempt.attempt
+                                if failed_attempt is not None
+                                else None
+                            )
+                            restarted_attempt_number = (
+                                restarted.attempt
+                                if restarted is not None
+                                else None
+                            )
                         if failed_attempt is None or restarted is None:
                             raise RuntimeError(
                                 "Could not restart bounded pipeline stage retry"
                             )
+                        self._record_stage(
+                            job_id=job_id,
+                            stage=stage,
+                            status=STAGE_STATUS_FAILED,
+                            previous_status=STAGE_STATUS_RUNNING,
+                            attempt=failed_attempt_number,
+                            error_code=_telemetry_error_code(error_code),
+                        )
+                        self._record_stage(
+                            job_id=job_id,
+                            stage=stage,
+                            status=STAGE_STATUS_RUNNING,
+                            previous_status=STAGE_STATUS_FAILED,
+                            attempt=restarted_attempt_number,
+                        )
                         retry_count = 1
                         continue
                     if failure_action == "skip_stage":
@@ -836,28 +897,60 @@ class PipelineJobRunner:
                         failed_stages.append(stage)
                         break
                     if failure_action == "stop_job":
-                        with self.database.session() as session:
-                            finished = self.store.finish_stage(
-                                session,
-                                job_id,
-                                stage,
-                                STAGE_STATUS_FAILED,
-                                result={"errorCode": error_code},
-                                error=error_code or "pipeline_stage_failed",
-                            )
-                            self.store.skip_pending_stages(session, job_id)
-                            stopped = self.store.set_job_status(
-                                session,
-                                job_id,
-                                JOB_STATUS_FAILED,
-                                expected_statuses={JOB_STATUS_RUNNING},
-                                error_summary=error_code or "pipeline_stage_failed",
-                                finished_at=_utcnow(),
-                            )
-                        if finished is None or not stopped:
+                        skipped_stages: list[str] = []
+                        try:
+                            with self.database.session() as session:
+                                finished = self.store.finish_stage(
+                                    session,
+                                    job_id,
+                                    stage,
+                                    STAGE_STATUS_FAILED,
+                                    result={"errorCode": error_code},
+                                    error=error_code or "pipeline_stage_failed",
+                                )
+                                if finished is None:
+                                    raise _TerminalTransitionConflict
+                                skipped_stages = self.store.skip_pending_stages(
+                                    session,
+                                    job_id,
+                                )
+                                stopped = self.store.set_job_status(
+                                    session,
+                                    job_id,
+                                    JOB_STATUS_FAILED,
+                                    expected_statuses={JOB_STATUS_RUNNING},
+                                    error_summary=(
+                                        error_code or "pipeline_stage_failed"
+                                    ),
+                                    finished_at=_utcnow(),
+                                )
+                                if not stopped:
+                                    raise _TerminalTransitionConflict
+                        except _TerminalTransitionConflict as exc:
                             raise RuntimeError(
                                 "Could not stop failed pipeline job"
+                            ) from exc
+                        safe_error_code = _telemetry_error_code(error_code)
+                        self._record_stage(
+                            job_id=job_id,
+                            stage=stage,
+                            status=STAGE_STATUS_FAILED,
+                            previous_status=STAGE_STATUS_RUNNING,
+                            error_code=safe_error_code,
+                        )
+                        for skipped_stage in skipped_stages:
+                            self._record_stage(
+                                job_id=job_id,
+                                stage=skipped_stage,
+                                status=STAGE_STATUS_SKIPPED,
+                                previous_status="pending",
                             )
+                        self._record_lifecycle(
+                            job_id=job_id,
+                            status=JOB_STATUS_FAILED,
+                            previous_status=JOB_STATUS_RUNNING,
+                            error_code=safe_error_code,
+                        )
                         return
                     raise PipelineJobError(
                         "decision_action_unavailable",
@@ -891,6 +984,12 @@ class PipelineJobRunner:
                                 raise RuntimeError(
                                     "Could not cancel current pipeline stage"
                                 )
+                            self._record_stage(
+                                job_id=job_id,
+                                stage=stage,
+                                status=STAGE_STATUS_CANCELLED,
+                                previous_status=STAGE_STATUS_RUNNING,
+                            )
                             self._finish_cancellation(job_id)
                             return
                         elif after_action not in {
@@ -914,10 +1013,31 @@ class PipelineJobRunner:
                         raise RuntimeError(
                             f"Could not finish pipeline stage: {stage}"
                         )
+                self._record_stage(
+                    job_id=job_id,
+                    stage=stage,
+                    status=stage_status,
+                    previous_status=STAGE_STATUS_RUNNING,
+                    error_code=(
+                        _telemetry_error_code(error)
+                        if stage_status == STAGE_STATUS_FAILED
+                        else ""
+                    ),
+                )
 
                 if skip_remaining:
                     with self.database.session() as session:
-                        self.store.skip_pending_stages(session, job_id)
+                        skipped_stages = self.store.skip_pending_stages(
+                            session,
+                            job_id,
+                        )
+                    for skipped_stage in skipped_stages:
+                        self._record_stage(
+                            job_id=job_id,
+                            stage=skipped_stage,
+                            status=STAGE_STATUS_SKIPPED,
+                            previous_status="pending",
+                        )
                     break
 
                 if self._is_cancelling(job_id):
@@ -950,6 +1070,17 @@ class PipelineJobRunner:
                         "Pipeline terminal status CAS failed: "
                         f"expected {final_status}, found {actual_status}"
                     )
+            if completed:
+                self._record_lifecycle(
+                    job_id=job_id,
+                    status=final_status,
+                    previous_status=JOB_STATUS_RUNNING,
+                    error_code=(
+                        "internal_error"
+                        if final_status == JOB_STATUS_PARTIAL_FAILED
+                        else ""
+                    ),
+                )
         except _RunnerCancellationRequested:
             self._finish_cancellation(job_id)
             return
@@ -1030,6 +1161,18 @@ class PipelineJobRunner:
                 )
             return _account_snapshot(account)
 
+    def _record_lifecycle(self, **payload: Any) -> None:
+        try:
+            self.event_recorder.record_lifecycle(**payload)
+        except Exception:
+            logger.warning("Pipeline lifecycle telemetry was skipped")
+
+    def _record_stage(self, **payload: Any) -> None:
+        try:
+            self.event_recorder.record_stage(**payload)
+        except Exception:
+            logger.warning("Pipeline stage telemetry was skipped")
+
     def _ordered_stages(self, job_id: str) -> list[str]:
         with self.database.session() as session:
             job = self.store.get_job(session, job_id)
@@ -1054,70 +1197,147 @@ class PipelineJobRunner:
             return bool(job and job.status == JOB_STATUS_CANCELLING)
 
     def _finish_cancellation(self, job_id: str) -> None:
-        with self.database.session() as session:
-            running_stages = list(
-                session.scalars(
-                    select(PipelineJobStage).where(
-                        PipelineJobStage.job_id == job_id,
-                        PipelineJobStage.status == STAGE_STATUS_RUNNING,
+        cancelled_stages: list[tuple[str, str]] = []
+        job_transitioned = False
+        try:
+            with self.database.session() as session:
+                running_stages = list(
+                    session.scalars(
+                        select(PipelineJobStage).where(
+                            PipelineJobStage.job_id == job_id,
+                            PipelineJobStage.status == STAGE_STATUS_RUNNING,
+                        )
                     )
                 )
-            )
-            for stage in running_stages:
-                self.store.finish_stage(
-                    session,
-                    job_id,
-                    stage.stage,
-                    STAGE_STATUS_CANCELLED,
-                    result={"decision": "cancel_requested"},
-                )
-            self.store.cancel_pending_stages(session, job_id)
-            self.store.set_job_status(
-                session,
-                job_id,
-                JOB_STATUS_CANCELLED,
-                expected_statuses={JOB_STATUS_CANCELLING},
-                finished_at=_utcnow(),
-            )
-
-    def _finish_internal_error(self, job_id: str, exc: Exception) -> None:
-        with self.database.session() as session:
-            job = self.store.get_job(session, job_id)
-            if job is None or job.status in TERMINAL_JOB_STATUSES:
-                return
-            running_stages = list(
-                session.scalars(
-                    select(PipelineJobStage).where(
-                        PipelineJobStage.job_id == job_id,
-                        PipelineJobStage.status == STAGE_STATUS_RUNNING,
+                for stage in running_stages:
+                    finished = self.store.finish_stage(
+                        session,
+                        job_id,
+                        stage.stage,
+                        STAGE_STATUS_CANCELLED,
+                        result={"decision": "cancel_requested"},
+                    )
+                    if finished is not None:
+                        cancelled_stages.append(
+                            (stage.stage, STAGE_STATUS_RUNNING)
+                        )
+                cancelled_stages.extend(
+                    (stage, "pending")
+                    for stage in self.store.cancel_pending_stages(
+                        session,
+                        job_id,
                     )
                 )
-            )
-            for stage in running_stages:
-                self.store.finish_stage(
-                    session,
-                    job_id,
-                    stage.stage,
-                    STAGE_STATUS_FAILED,
-                    error=str(exc),
-                )
-            if job.status == JOB_STATUS_CANCELLING:
-                self.store.cancel_pending_stages(session, job_id)
-                self.store.set_job_status(
+                job_transitioned = self.store.set_job_status(
                     session,
                     job_id,
                     JOB_STATUS_CANCELLED,
                     expected_statuses={JOB_STATUS_CANCELLING},
                     finished_at=_utcnow(),
                 )
-                return
-            self.store.set_job_status(
-                session,
-                job_id,
-                JOB_STATUS_FAILED,
-                expected_statuses={JOB_STATUS_RUNNING},
-                error_summary=str(exc),
-                finished_at=_utcnow(),
+                if not job_transitioned and cancelled_stages:
+                    raise _TerminalTransitionConflict
+        except _TerminalTransitionConflict:
+            return
+        for stage, previous_status in cancelled_stages:
+            self._record_stage(
+                job_id=job_id,
+                stage=stage,
+                status=STAGE_STATUS_CANCELLED,
+                previous_status=previous_status,
+            )
+        if job_transitioned:
+            self._record_lifecycle(
+                job_id=job_id,
+                status=JOB_STATUS_CANCELLED,
+                previous_status=JOB_STATUS_CANCELLING,
+            )
+
+    def _finish_internal_error(self, job_id: str, exc: Exception) -> None:
+        failed_stages: list[str] = []
+        cancelled_stages: list[str] = []
+        final_status = ""
+        try:
+            with self.database.session() as session:
+                job = self.store.get_job(session, job_id)
+                if job is None or job.status in TERMINAL_JOB_STATUSES:
+                    return
+                running_stages = list(
+                    session.scalars(
+                        select(PipelineJobStage).where(
+                            PipelineJobStage.job_id == job_id,
+                            PipelineJobStage.status == STAGE_STATUS_RUNNING,
+                        )
+                    )
+                )
+                for stage in running_stages:
+                    finished = self.store.finish_stage(
+                        session,
+                        job_id,
+                        stage.stage,
+                        STAGE_STATUS_FAILED,
+                        error=str(exc),
+                    )
+                    if finished is not None:
+                        failed_stages.append(stage.stage)
+                if job.status == JOB_STATUS_CANCELLING:
+                    cancelled_stages = self.store.cancel_pending_stages(
+                        session,
+                        job_id,
+                    )
+                    transitioned = self.store.set_job_status(
+                        session,
+                        job_id,
+                        JOB_STATUS_CANCELLED,
+                        expected_statuses={JOB_STATUS_CANCELLING},
+                        finished_at=_utcnow(),
+                    )
+                    if transitioned:
+                        final_status = JOB_STATUS_CANCELLED
+                else:
+                    transitioned = self.store.set_job_status(
+                        session,
+                        job_id,
+                        JOB_STATUS_FAILED,
+                        expected_statuses={JOB_STATUS_RUNNING},
+                        error_summary=str(exc),
+                        finished_at=_utcnow(),
+                    )
+                    if transitioned:
+                        final_status = JOB_STATUS_FAILED
+                if not transitioned and (failed_stages or cancelled_stages):
+                    raise _TerminalTransitionConflict
+        except _TerminalTransitionConflict:
+            return
+        for stage in failed_stages:
+            self._record_stage(
+                job_id=job_id,
+                stage=stage,
+                status=STAGE_STATUS_FAILED,
+                previous_status=STAGE_STATUS_RUNNING,
+                error_code="internal_error",
+            )
+        for stage in cancelled_stages:
+            self._record_stage(
+                job_id=job_id,
+                stage=stage,
+                status=STAGE_STATUS_CANCELLED,
+                previous_status="pending",
+            )
+        if final_status:
+            self._record_lifecycle(
+                job_id=job_id,
+                status=final_status,
+                previous_status=(
+                    JOB_STATUS_CANCELLING
+                    if final_status == JOB_STATUS_CANCELLED
+                    else JOB_STATUS_RUNNING
+                ),
+                error_code=(
+                    "internal_error"
+                    if final_status == JOB_STATUS_FAILED
+                    else ""
+                ),
             )
 
 
@@ -1384,6 +1604,11 @@ def _utcnow():
     from datetime import datetime
 
     return datetime.utcnow()
+
+
+def _telemetry_error_code(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in PUBLIC_ERROR_MESSAGES else "internal_error"
 
 
 __all__ = [

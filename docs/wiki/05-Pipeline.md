@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-09（v0.6.7，Hermes Runner 决策策略接线）
+> 最后更新: 2026-08-11（v0.6.8，Hermes/Browse Job 事件接线）
 
 ## 单一任务入口
 
@@ -166,9 +166,32 @@ Job 形成 `partial_failed`。账号阻断默认安全跳过；尚无真实执�
 动作一律不公开。Task 5 核心/Runtime、H4-A、Pipeline API/Core、Acquisition 与 Browse 分批
 组合回归共 **474 passed**。
 
-当前仍未完成 H4-B Task 6 的 Hermes/Browse 事件到持久化 Job 事件表绑定；也没有新增受认证
-实时 API 或前端作战窗口。因此后端已经能自动创建、超时解决和等待显式人工关卡，但现有页面
-还不能显示实时事件、倒计时或提交关卡选择，不能把 Task 5 描述成完整可视化交互已经交付。
+### H4-B Task 6：Job-scoped Hermes/Browse 事件
+
+Pipeline 的执行上下文现在显式携带同一个 `event_recorder` 与真实 `job_id`，并沿
+`PipelineService → HermesEvidenceAgent → BrowseAgent` 传递；不使用全局 current-job。阶段 01
+产生的每条持久 Browse 事件固定 `stage=collect`。独立 CLI Browse 不提供 Job，因此只继续发布
+兼容的进程内 `BROWSE_STEP/BROWSE_DONE`，不会写 `pipeline_job_events`；业务 UI 后续只以持久
+Job 事件作为权威源。
+
+Browse step 只通过 `record_browse()` 安全 builder 保存受信平台 URL、受限 rationale、页面类型、
+动作参数、证据计数和截图 SHA-256 hash，不保存截图字节、DOM、Prompt/Response 或原始 evidence。
+每次 Browse 只写一条权威 `browse.done`；完成预算会从内部 snake_case 转换为白名单公共字段，不把内部键带入持久 payload。
+两个 Job 并行运行时各自使用显式上下文，事件不会串流。Recorder 抛错或 SQLite 遥测写失败均被
+调用点 fail-open，不能改变 BrowseResult，也不能增加页面、LLM、时间或 observation 预算。同步
+Recorder 由单次 Browse 的有序后台队列执行；结束时最多等待 1.25 秒，超时会丢弃剩余遥测并回收
+命名 worker，不能阻塞 BrowseResult、Job 结束或账号租约释放。注入的同步 Recorder 单次调用必须
+自行有界；默认 `PipelineLiveEventRecorder` 使用最多 1000ms 的 SQLite busy timeout。
+
+Runner 使用同一个 Recorder 记录 Job/Stage 的 running 与终态生命周期；DecisionGate 在真实
+checkpoint 事务提交后立即记录 pending，并在 human、timeout 或 cancel 的权威 CAS 提交后只记录
+一个 `resolved/expired/cancelled` 终态。Runner 的批量 Stage 终态与 Job 终态在同一业务事务内
+校验 CAS；失败会整体回滚，成功提交后才按 Stage 顺序记录事件，最后记录 Job 终态。遥测记录本身
+不位于业务事务内，失败不会回滚状态机。
+Task 6 专项回归 **223 passed**；H4-A/Policy/Runtime、Acquisition 与 Browse E2E 相邻回归去重后 **133 passed**。
+
+当前仍未完成 H4-C Task 7 的受认证实时 API，也没有前端作战窗口。因此数据库已经有真实运行
+事件和决策审计，但现有页面尚不能显示实时事件、倒计时或提交关卡选择。
 
 ## 阶段执行流程
 

@@ -9,7 +9,7 @@ import logging
 from threading import Lock
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -22,6 +22,7 @@ from tiktok_bot_core.models.pipeline_states import (
 from tiktok_bot_core.storage.database import Database
 from tiktok_bot_core.storage.pipeline_live_store import (
     BROWSE_ACTIONS,
+    CHECKPOINT_STATUSES,
     JOB_ERROR_EVENT_STATUSES,
     PipelineLiveStore,
     PUBLIC_ERROR_MESSAGES,
@@ -108,8 +109,9 @@ class PipelineLiveEventRecorder:
         self._telemetry_session_factory: sessionmaker[Session] | None = None
 
         url = make_url(database.db_url)
+        self._sqlite_backend = url.get_backend_name() == "sqlite"
         if (
-            url.get_backend_name() == "sqlite"
+            self._sqlite_backend
             and url.database not in {None, "", ":memory:"}
         ):
             telemetry_engine = create_engine(
@@ -294,6 +296,139 @@ class PipelineLiveEventRecorder:
             )
             return self._not_persisted(job_id)
 
+    @staticmethod
+    def _checkpoint_decision_payload(
+        checkpoint: Any,
+        *,
+        status: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schemaVersion": 1,
+            "checkpointId": checkpoint.id,
+            "kind": checkpoint.kind,
+            "status": status,
+        }
+        deadline = (
+            None
+            if checkpoint.kind == "manual_review_session"
+            else checkpoint.deadline_at
+        )
+        if deadline is not None:
+            payload["deadlineAt"] = deadline.isoformat()
+        if status == "pending":
+            payload["defaultOptionKey"] = checkpoint.default_option_key
+        else:
+            _optional(payload, "resolutionKey", checkpoint.resolution_key)
+            _optional(
+                payload,
+                "resolutionSource",
+                checkpoint.resolution_source or "system",
+            )
+        return payload
+
+    def _record_checkpoint_decision(
+        self,
+        *,
+        job_id: str,
+        stage: str,
+        checkpoint_id: str,
+        kind: str,
+    ) -> EventRecordResult:
+        """Append the canonical pending/terminal prefix for one checkpoint.
+
+        ``BEGIN IMMEDIATE`` serializes independent recorder connections before
+        they inspect existing events.  The checkpoint row is the authority, so
+        an early or contradictory caller cannot invent a terminal event.
+        """
+
+        try:
+            committed_watermark: int | None = None
+            persisted_sequence: int | None = None
+            with self._session() as session:
+                if self._sqlite_backend:
+                    session.execute(text("BEGIN IMMEDIATE"))
+                checkpoint = self._store.get_checkpoint(
+                    session,
+                    job_id=job_id,
+                    checkpoint_id=checkpoint_id,
+                )
+                if (
+                    checkpoint is None
+                    or checkpoint.stage != stage
+                    or checkpoint.kind != kind
+                ):
+                    return self._not_persisted(job_id)
+                existing = self._store.list_checkpoint_events(
+                    session,
+                    job_id=job_id,
+                    checkpoint_id=checkpoint_id,
+                )
+                statuses = [
+                    str(event.payload_json.get("status") or "")
+                    for event in existing
+                ]
+                if existing:
+                    committed_watermark = existing[-1].sequence
+                terminal_statuses = CHECKPOINT_STATUSES - {"pending"}
+                has_pending = "pending" in statuses
+                has_terminal = any(
+                    status in terminal_statuses for status in statuses
+                )
+
+                # Never append a late pending behind a legacy terminal.  Fresh
+                # writes always create pending and terminal in this transaction.
+                if not has_pending and not has_terminal:
+                    pending = self._store.append_event(
+                        session,
+                        job_id=job_id,
+                        stage=stage,
+                        event_type="decision.lifecycle",
+                        level="warning",
+                        payload=self._checkpoint_decision_payload(
+                            checkpoint,
+                            status="pending",
+                        ),
+                    )
+                    persisted_sequence = pending.sequence
+                    committed_watermark = pending.sequence
+                    has_pending = True
+
+                if checkpoint.status != "pending" and not has_terminal:
+                    terminal = self._store.append_event(
+                        session,
+                        job_id=job_id,
+                        stage=stage,
+                        event_type="decision.lifecycle",
+                        level="info",
+                        payload=self._checkpoint_decision_payload(
+                            checkpoint,
+                            status=checkpoint.status,
+                        ),
+                    )
+                    persisted_sequence = terminal.sequence
+                    committed_watermark = terminal.sequence
+
+                result = EventRecordResult(
+                    sequence=persisted_sequence,
+                    watermark=(
+                        committed_watermark
+                        if committed_watermark is not None
+                        else self._watermark(job_id)
+                    ),
+                    persisted=persisted_sequence is not None,
+                )
+            self._apply_committed_cache_update(
+                job_id=job_id,
+                watermark=committed_watermark,
+                mark_high_frequency_exhausted=False,
+                clear_job_cache=False,
+            )
+            return result
+        except Exception:
+            logger.warning(
+                "Pipeline live telemetry write was skipped for decision.lifecycle"
+            )
+            return self._not_persisted(job_id)
     def record_lifecycle(
         self,
         *,
@@ -466,27 +601,21 @@ class PipelineLiveEventRecorder:
         message: str = "",
     ) -> EventRecordResult:
         normalized_job_id = _required_job_id(job_id)
-        payload: dict[str, Any] = {
-            "schemaVersion": 1,
-            "checkpointId": checkpoint_id,
-            "kind": kind,
-            "status": status,
-        }
-        _optional(payload, "defaultOptionKey", default_option_key)
-        if isinstance(deadline_at, datetime):
-            deadline_value: str | None = deadline_at.isoformat()
-        else:
-            deadline_value = deadline_at
-        _optional(payload, "deadlineAt", deadline_value)
-        _optional(payload, "resolutionKey", resolution_key)
-        _optional(payload, "resolutionSource", resolution_source)
-        _optional(payload, "message", message)
-        return self._record(
+        if not isinstance(status, str) or status not in CHECKPOINT_STATUSES:
+            logger.warning(
+                "Pipeline live telemetry rejected an unregistered decision status"
+            )
+            return self._not_persisted(normalized_job_id)
+        # Caller fields are accepted for API compatibility, but the durable
+        # checkpoint row is the only authority for pending/default/deadline and
+        # terminal resolution.  This also prevents raw caller text from being
+        # persisted on decision events.
+        del default_option_key, deadline_at, resolution_key, resolution_source, message
+        return self._record_checkpoint_decision(
             job_id=normalized_job_id,
             stage=stage,
-            event_type="decision.lifecycle",
-            level="warning" if status == "pending" else "info",
-            payload=payload,
+            checkpoint_id=str(checkpoint_id or "").strip(),
+            kind=str(kind or "").strip(),
         )
 
     def record_candidate(

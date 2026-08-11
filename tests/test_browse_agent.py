@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tiktok_bot_core.events.bus import Event, EventBus, EventType
+from tiktok_bot_core.llm.router import LLMRouteError
 from tiktok_bot_core.services.browse_agent import (
     ALLOWED_ACTIONS,
     BrowseAction,
@@ -123,6 +126,40 @@ class FakeBrowserClient:
     @property
     def _ctx(self) -> Any:
         return self._context
+
+
+class CapturingLiveRecorder:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.browse_calls: list[dict[str, Any]] = []
+
+    def record_browse(self, **kwargs):
+        self.browse_calls.append(dict(kwargs))
+        if self.fail:
+            raise RuntimeError("telemetry unavailable")
+
+
+class SlowFailingLiveRecorder(CapturingLiveRecorder):
+    def __init__(self, delay_seconds: float) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+
+    def record_browse(self, **kwargs):
+        time.sleep(self.delay_seconds)
+        self.browse_calls.append(dict(kwargs))
+        raise RuntimeError("telemetry unavailable")
+
+
+class BlockingLiveRecorder(CapturingLiveRecorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def record_browse(self, **kwargs):
+        self.started.set()
+        self.release.wait()
+        self.browse_calls.append(dict(kwargs))
 
 
 # === 动作协议契约 ==============================================================
@@ -241,6 +278,366 @@ async def test_agent_drives_browser_through_llm_decisions_to_done():
     assert step_events[1].payload["step"] == 2
     assert step_events[1].payload["action"] == "scroll"
     assert done_events[0].payload["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_job_scoped_browse_events_are_explicit_and_cli_mode_is_memory_only():
+    recorder = CapturingLiveRecorder()
+    agent = BrowseAgent(
+        router=make_fake_router([
+            _wrap_decision(FakeDecision("scroll", {"px": 600}, "scan results")),
+            _wrap_decision(FakeDecision("done", {"summary": "complete"})),
+        ]),
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+        event_recorder=recorder,
+        job_id="job-alpha",
+        stage="collect",
+    )
+
+    result = await agent.run(
+        goal="find candidates",
+        platform="douyin",
+        account_id=1,
+    )
+
+    assert result.status == "done"
+    assert recorder.browse_calls
+    assert {
+        (call["job_id"], call["stage"])
+        for call in recorder.browse_calls
+    } == {("job-alpha", "collect")}
+    assert {call["action"] for call in recorder.browse_calls} >= {
+        "scroll",
+        "done",
+    }
+    step_call = next(
+        call for call in recorder.browse_calls if call["action"] == "scroll"
+    )
+    assert step_call["scroll_px"] == 600
+    assert step_call["screenshot_hash"]
+    assert len(step_call["screenshot_hash"]) == 64
+    assert "screenshot" not in step_call
+
+    calls_before_cli = len(recorder.browse_calls)
+    standalone = BrowseAgent(
+        router=make_fake_router([
+            _wrap_decision(FakeDecision("done", {"summary": "standalone"})),
+        ]),
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+        event_recorder=recorder,
+    )
+    standalone_result = await standalone.run(
+        goal="standalone browse",
+        platform="douyin",
+        account_id=2,
+    )
+    assert standalone_result.status == "done"
+    assert len(recorder.browse_calls) == calls_before_cli
+
+
+@pytest.mark.asyncio
+async def test_parallel_job_browse_events_never_mix_job_context():
+    recorder = CapturingLiveRecorder()
+
+    async def run_one(job_id: str, account_id: int):
+        return await BrowseAgent(
+            router=make_fake_router([
+                _wrap_decision(
+                    FakeDecision("scroll", {"px": 400}, "scan results")
+                ),
+                _wrap_decision(FakeDecision("done", {"summary": job_id})),
+            ]),
+            bus=EventBus(),
+            browser_factory=lambda: FakeBrowserClient(),
+            event_recorder=recorder,
+            job_id=job_id,
+            stage="collect",
+        ).run(
+            goal=job_id,
+            platform="douyin",
+            account_id=account_id,
+        )
+
+    first, second = await asyncio.gather(
+        run_one("job-one", 11),
+        run_one("job-two", 22),
+    )
+
+    assert first.summary == "job-one"
+    assert second.summary == "job-two"
+    grouped = {
+        job_id: [
+            call for call in recorder.browse_calls if call["job_id"] == job_id
+        ]
+        for job_id in ("job-one", "job-two")
+    }
+    assert all(grouped.values())
+    assert all(
+        call["stage"] == "collect"
+        for calls in grouped.values()
+        for call in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_browse_events_persist_to_their_own_jobs(tmp_path):
+    from tiktok_bot_core.services.pipeline_live_events import (
+        PipelineLiveEventRecorder,
+    )
+    from tiktok_bot_core.storage.database import Database
+    from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
+    from tiktok_bot_core.storage.pipeline_live_store import PipelineLiveStore
+
+    database = Database(f"sqlite:///{tmp_path / 'browse-live.db'}")
+    database.init()
+    with database.session() as session:
+        first_job = PipelineJobStore().create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        ).id
+        second_job = PipelineJobStore().create_job(
+            session,
+            platform="douyin",
+            account_mode="auto",
+            account_id=None,
+            stages=["collect"],
+        ).id
+    recorder = PipelineLiveEventRecorder(database)
+
+    async def run_one(job_id: str, account_id: int):
+        return await BrowseAgent(
+            router=make_fake_router([
+                _wrap_decision(
+                    FakeDecision("scroll", {"px": 400}, "scan results")
+                ),
+                _wrap_decision(FakeDecision("done", {"summary": job_id})),
+            ]),
+            bus=EventBus(),
+            browser_factory=lambda: FakeBrowserClient(),
+            event_recorder=recorder,
+            job_id=job_id,
+            stage="collect",
+        ).run(goal=job_id, platform="douyin", account_id=account_id)
+
+    await asyncio.gather(
+        run_one(first_job, 1),
+        run_one(second_job, 2),
+    )
+
+    with database.session() as session:
+        first_events = PipelineLiveStore().list_events(
+            session,
+            job_id=first_job,
+        )
+        second_events = PipelineLiveStore().list_events(
+            session,
+            job_id=second_job,
+        )
+        assert first_events and second_events
+        assert {event.job_id for event in first_events} == {first_job}
+        assert {event.job_id for event in second_events} == {second_job}
+        assert {event.stage for event in first_events + second_events} == {
+            "collect"
+        }
+        done_events = [
+            event
+            for event in first_events + second_events
+            if event.event_type == "browse.done"
+            and event.payload_json.get("summary")
+        ]
+        assert len(done_events) == 2
+        assert all(
+            set(event.payload_json["budget"])
+            == {"stepsUsed", "pagesUsed", "llmCallsUsed", "durationSeconds"}
+            for event in done_events
+        )
+        persisted_payloads = [
+            event.payload_json for event in first_events + second_events
+        ]
+        assert all(
+            not {
+                "steps",
+                "llm_calls",
+                "duration_seconds",
+                "cookie",
+                "token",
+                "auth",
+                "api_key",
+                "profile",
+                "prompt",
+                "response",
+                "credential",
+            }.intersection(payload)
+            for payload in persisted_payloads
+        )
+        persisted_text = json.dumps(persisted_payloads).lower()
+        assert not any(
+            marker in persisted_text
+            for marker in (
+                "cookie",
+                "bearer ",
+                "api_key",
+                "apikey",
+                "credential",
+                "rawprompt",
+                "rawresponse",
+            )
+        )
+        step_events = [
+            event
+            for event in first_events + second_events
+            if event.payload_json.get("screenshotHash")
+        ]
+        assert step_events
+        assert all("screenshot" not in event.payload_json for event in step_events)
+    database.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_recorder_failure_does_not_change_result_or_budget():
+    decisions = [
+        _wrap_decision(FakeDecision("done", {"summary": "safe result"})),
+    ]
+    baseline = await BrowseAgent(
+        router=make_fake_router(decisions),
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+    ).run(goal="baseline", platform="douyin", account_id=1)
+    with_failed_recorder = await BrowseAgent(
+        router=make_fake_router(decisions),
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+        event_recorder=CapturingLiveRecorder(fail=True),
+        job_id="job-fail-open",
+        stage="collect",
+    ).run(goal="baseline", platform="douyin", account_id=1)
+
+    assert with_failed_recorder == baseline
+
+
+@pytest.mark.asyncio
+async def test_slow_failing_recorder_does_not_consume_browse_deadline_or_leak_tasks():
+    def build_agent(recorder=None):
+        return BrowseAgent(
+            router=make_fake_router([
+                _wrap_decision(
+                    FakeDecision("scroll", {"px": 400}, "scan results")
+                ),
+                _wrap_decision(FakeDecision("done", {"summary": "complete"})),
+            ]),
+            bus=EventBus(),
+            browser_factory=lambda: FakeBrowserClient(),
+            max_duration_seconds=0.01,
+            monotonic=lambda: 0.0,
+            event_recorder=recorder,
+            job_id="job-slow" if recorder is not None else "",
+            stage="collect" if recorder is not None else "",
+        )
+
+    baseline = await build_agent().run(
+        goal="baseline",
+        platform="douyin",
+        account_id=1,
+    )
+    tasks_before = set(asyncio.all_tasks())
+    recorder = SlowFailingLiveRecorder(0.03)
+    with_recorder = await build_agent(recorder).run(
+        goal="baseline",
+        platform="douyin",
+        account_id=1,
+    )
+    await asyncio.sleep(0)
+
+    assert with_recorder == baseline
+    assert [call["action"] for call in recorder.browse_calls] == [
+        "scroll",
+        "done",
+    ]
+    leaked = [
+        task
+        for task in set(asyncio.all_tasks()) - tasks_before
+        if not task.done() and task.get_name().startswith("browse-telemetry-")
+    ]
+    assert leaked == []
+
+
+@pytest.mark.asyncio
+async def test_blocking_recorder_cannot_block_browse_result_or_leak_tasks():
+    recorder = BlockingLiveRecorder()
+    agent = BrowseAgent(
+        router=make_fake_router([
+            _wrap_decision(FakeDecision("done", {"summary": "complete"})),
+        ]),
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+        event_recorder=recorder,
+        job_id="job-blocking-recorder",
+        stage="collect",
+    )
+    tasks_before = set(asyncio.all_tasks())
+    task = asyncio.create_task(
+        agent.run(goal="baseline", platform="douyin", account_id=1)
+    )
+    assert await asyncio.to_thread(recorder.started.wait, 1.0)
+    try:
+        result = await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        recorder.release.set()
+    await asyncio.sleep(0)
+
+    assert result.status == "done"
+    leaked = [
+        pending
+        for pending in set(asyncio.all_tasks()) - tasks_before
+        if not pending.done()
+        and pending.get_name().startswith("browse-telemetry-")
+    ]
+    assert leaked == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "expected_error_code"),
+    [
+        (
+            LLMRouteError(route="iteration", error_category="circuit_open"),
+            "circuit_open",
+        ),
+        ({"action": "done", "payload": 1}, "internal_error"),
+    ],
+)
+async def test_propagated_browse_failure_records_only_one_safe_error(
+    decision,
+    expected_error_code,
+):
+    recorder = CapturingLiveRecorder()
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=decision if isinstance(decision, Exception) else None,
+        return_value=decision if isinstance(decision, dict) else None,
+    )
+    agent = BrowseAgent(
+        router=router,
+        bus=EventBus(),
+        browser_factory=lambda: FakeBrowserClient(),
+        event_recorder=recorder,
+        job_id="job-error",
+        stage="collect",
+    )
+
+    with pytest.raises(LLMRouteError):
+        await agent.run(goal="fail safely", platform="douyin", account_id=1)
+
+    assert len(recorder.browse_calls) == 1
+    assert recorder.browse_calls[0]["action"] == "error"
+    assert recorder.browse_calls[0]["error_code"] == expected_error_code
+    assert "message" not in recorder.browse_calls[0]
+    assert "rationale" not in recorder.browse_calls[0]
 
 
 @pytest.mark.asyncio

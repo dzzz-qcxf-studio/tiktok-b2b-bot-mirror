@@ -936,10 +936,16 @@ class HermesEvidenceAgent:
         router: LLMRouter,
         bus: EventBus,
         max_steps: int = 10,
+        event_recorder: Any | None = None,
+        job_id: str | None = None,
+        stage: str = "collect",
     ) -> None:
         self._router = router
         self._bus = bus
         self._max_steps = max_steps
+        self._event_recorder = event_recorder
+        self._job_id = str(job_id or "").strip()
+        self._stage = str(stage or "").strip()
         self.last_budget_usage: dict[str, int | float] = {}
         self.last_exhaustion_reason = ""
         self.last_visited_urls: list[str] = []
@@ -975,6 +981,9 @@ class HermesEvidenceAgent:
             manage_browser_lifecycle=False,
             tracker=tracker or ExplorationBudgetTracker(budget),
             current_keyword=keyword,
+            event_recorder=self._event_recorder,
+            job_id=self._job_id,
+            stage=self._stage,
         )
         result = await agent.run(
             goal=(

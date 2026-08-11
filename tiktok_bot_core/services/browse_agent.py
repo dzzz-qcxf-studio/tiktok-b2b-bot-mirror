@@ -24,6 +24,7 @@ from urllib.parse import urljoin, urlsplit
 from tiktok_bot_core.events.bus import Event, EventBus, EventType
 from tiktok_bot_core.llm.router import LLMRouteError, LLMRouter
 from tiktok_bot_core.services.acquisition_agents import EvidenceObservation
+from tiktok_bot_core.storage.pipeline_live_store import PUBLIC_ERROR_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,7 @@ _DECISION_SYSTEM = (
 
 
 def _hash_screenshot(data: bytes) -> str:
-    return hashlib.sha256(data or b"").hexdigest()[:16]
+    return hashlib.sha256(data or b"").hexdigest()
 
 
 def _platform_url_is_safe(
@@ -203,6 +204,93 @@ def _sanitize_visible_text(value: str, *, limit: int = 12_000) -> str:
     return cleaned[:limit]
 
 
+_TELEMETRY_STOP = object()
+_TELEMETRY_CLOSE_TIMEOUT_SECONDS = 1.25
+
+
+class _OrderedBrowseTelemetry:
+    """Run-scoped ordered bridge from async Browse work to sync telemetry."""
+
+    def __init__(
+        self,
+        *,
+        recorder: Any | None,
+        job_id: str,
+        stage: str,
+        max_steps: int,
+    ) -> None:
+        self._recorder = recorder
+        self._job_id = job_id
+        self._stage = stage
+        self._enabled = bool(recorder is not None and job_id and stage)
+        # Reserve one slot for the terminal done/error record.  Ordinary step
+        # telemetry may be dropped at the bound, but the business loop never
+        # waits for SQLite or a custom recorder.
+        self._capacity = max(2, min(int(max_steps) + 1, 1_002))
+        self._queue: asyncio.Queue[Any] = asyncio.Queue(
+            maxsize=self._capacity
+        )
+        self._worker: asyncio.Task[None] | None = None
+
+    def enqueue(self, payload: dict[str, Any], *, terminal: bool = False) -> None:
+        if not self._enabled:
+            return
+        if self._worker is None:
+            self._worker = asyncio.create_task(
+                self._run(),
+                name=f"browse-telemetry-{self._job_id}",
+            )
+        if not terminal and self._queue.qsize() >= self._capacity - 1:
+            return
+        try:
+            self._queue.put_nowait(dict(payload))
+        except asyncio.QueueFull:
+            logger.warning("Job-scoped browse telemetry queue was full")
+
+    async def close(self) -> None:
+        if self._worker is None:
+            return
+        worker, self._worker = self._worker, None
+
+        async def drain() -> None:
+            await self._queue.put(_TELEMETRY_STOP)
+            await worker
+
+        try:
+            await asyncio.wait_for(
+                drain(),
+                timeout=_TELEMETRY_CLOSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self._enabled = False
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            logger.warning("Job-scoped browse telemetry flush timed out")
+        except asyncio.CancelledError:
+            self._enabled = False
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+
+    async def _run(self) -> None:
+        while True:
+            payload = await self._queue.get()
+            try:
+                if payload is _TELEMETRY_STOP:
+                    return
+                try:
+                    await asyncio.to_thread(
+                        self._recorder.record_browse,
+                        job_id=self._job_id,
+                        stage=self._stage,
+                        **payload,
+                    )
+                except Exception:
+                    logger.warning("Job-scoped browse telemetry was skipped")
+            finally:
+                self._queue.task_done()
+
+
 class BrowseAgent:
     """最小可用的截图→LLM→动作 闭环。
 
@@ -225,6 +313,9 @@ class BrowseAgent:
         monotonic: Callable[[], float] = time.monotonic,
         tracker: Any | None = None,
         current_keyword: str = "",
+        event_recorder: Any | None = None,
+        job_id: str | None = None,
+        stage: str = "",
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be > 0")
@@ -257,8 +348,51 @@ class BrowseAgent:
         self._monotonic = monotonic
         self._tracker = tracker
         self._current_keyword = str(current_keyword)
+        self._event_recorder = event_recorder
+        self._job_id = str(job_id or "").strip()
+        self._stage = str(stage or "").strip()
+        self._telemetry: _OrderedBrowseTelemetry | None = None
 
     async def run(
+        self,
+        *,
+        goal: str,
+        platform: str,
+        account_id: int,
+        start_url: str = "",
+    ) -> BrowseResult:
+        if self._telemetry is not None:
+            raise RuntimeError("BrowseAgent cannot run concurrently")
+        telemetry = _OrderedBrowseTelemetry(
+            recorder=self._event_recorder,
+            job_id=self._job_id,
+            stage=self._stage,
+            max_steps=self._max_steps,
+        )
+        self._telemetry = telemetry
+        try:
+            try:
+                return await self._run(
+                    goal=goal,
+                    platform=platform,
+                    account_id=account_id,
+                    start_url=start_url,
+                )
+            except Exception as exc:
+                self._record_browse(
+                    terminal=True,
+                    action="error",
+                    step=0,
+                    error_code=_browse_error_code(exc),
+                )
+                raise
+        finally:
+            try:
+                await telemetry.close()
+            finally:
+                self._telemetry = None
+
+    async def _run(
         self,
         *,
         goal: str,
@@ -304,6 +438,13 @@ class BrowseAgent:
                     },
                     source="browse_agent",
                 ),
+            )
+            self._record_browse_done(
+                status=result.status,
+                steps=result.steps,
+                summary=result.summary,
+                exhaustion_reason=result.exhaustion_reason,
+                budget=result.budget_usage,
             )
             return result
         steps: list[BrowseStep] = []
@@ -447,7 +588,13 @@ class BrowseAgent:
                                 rationale=rationale,
                             )
                         )
-                        self._publish_step(platform, account_id, steps[-1])
+                        self._publish_step(
+                            platform,
+                            account_id,
+                            steps[-1],
+                            current_url=current_url,
+                            evidence_count=len(observations),
+                        )
                         continue
                     except Exception as exc:  # JSON 解析 / KeyError 等
                         raise LLMRouteError(
@@ -476,7 +623,13 @@ class BrowseAgent:
                                 rationale=f"invalid: {exc}",
                             )
                         )
-                        self._publish_step(platform, account_id, steps[-1])
+                        self._publish_step(
+                            platform,
+                            account_id,
+                            steps[-1],
+                            current_url=current_url,
+                            evidence_count=len(observations),
+                        )
                         continue
 
                     if observation is not None and self._tracker is not None:
@@ -497,7 +650,13 @@ class BrowseAgent:
                                     rationale=f"budget: {decision.reason}",
                                 )
                             )
-                            self._publish_step(platform, account_id, steps[-1])
+                            self._publish_step(
+                                platform,
+                                account_id,
+                                steps[-1],
+                                current_url=current_url,
+                                evidence_count=len(observations),
+                            )
                             if decision.stop_after:
                                 exhaustion_reason = decision.reason
                                 break
@@ -528,7 +687,13 @@ class BrowseAgent:
                     steps.append(
                         step
                     )
-                    self._publish_step(platform, account_id, step)
+                    self._publish_step(
+                        platform,
+                        account_id,
+                        step,
+                        current_url=current_url,
+                        evidence_count=len(observations),
+                    )
 
                     if (
                         observation is not None
@@ -589,7 +754,7 @@ class BrowseAgent:
 
             elapsed = max(0.0, self._monotonic() - started_at)
 
-            return BrowseResult(
+            result = BrowseResult(
                 status=status,
                 summary=summary,
                 steps=len(steps),
@@ -608,9 +773,6 @@ class BrowseAgent:
                     for user_id, reasons in truncation_reasons.items()
                 },
             )
-        finally:
-            if self._manage_browser_lifecycle:
-                await _safe_close(browser)
             await _publish_event_bounded(
                 self._bus,
                 Event(
@@ -632,6 +794,17 @@ class BrowseAgent:
                     source="browse_agent",
                 ),
             )
+            self._record_browse_done(
+                status=result.status,
+                steps=result.steps,
+                summary=result.summary,
+                exhaustion_reason=result.exhaustion_reason,
+                budget=result.budget_usage,
+            )
+            return result
+        finally:
+            if self._manage_browser_lifecycle:
+                await _safe_close(browser)
 
     async def _ask_llm(
         self,
@@ -669,6 +842,9 @@ class BrowseAgent:
         platform: str,
         account_id: int,
         step: BrowseStep,
+        *,
+        current_url: str,
+        evidence_count: int,
     ) -> None:
         self._bus.fire(
             Event(
@@ -686,9 +862,94 @@ class BrowseAgent:
                 source="browse_agent",
             )
         )
+        action = step.action.action if step.action is not None else "error"
+        # ``done`` is persisted once below from the authoritative final
+        # BrowseResult, including its bounded public summary and budget.  The
+        # in-memory BROWSE_STEP event above remains unchanged for compatibility.
+        if action == "done":
+            return
+        kwargs: dict[str, Any] = {
+            "action": action,
+            "step": step.step,
+            "keyword": self._current_keyword,
+            "page_type": _browse_page_type(current_url),
+            "url": (
+                current_url
+                if _platform_url_is_safe(platform, current_url, allow_empty=True)
+                else ""
+            ),
+            "screenshot_hash": step.screenshot_hash,
+            "evidence_count": evidence_count,
+        }
+        if action == "error":
+            kwargs["error_code"] = "internal_error"
+        else:
+            kwargs["rationale"] = step.rationale
+            if action == "wait":
+                kwargs["wait_ms"] = step.action.payload.get("ms")
+            if action == "scroll":
+                kwargs["scroll_px"] = step.action.payload.get("px")
+        self._record_browse(**kwargs)
+
+    def _record_browse_done(
+        self,
+        *,
+        status: str,
+        steps: int,
+        summary: str,
+        exhaustion_reason: str,
+        budget: dict[str, int | float],
+    ) -> None:
+        self._record_browse(
+            terminal=True,
+            action="done",
+            step=steps,
+            keyword=self._current_keyword,
+            budget={
+                public_key: budget[source_key]
+                for source_key, public_key in {
+                    "steps": "stepsUsed",
+                    "pages": "pagesUsed",
+                    "llm_calls": "llmCallsUsed",
+                    "duration_seconds": "durationSeconds",
+                }.items()
+                if source_key in budget
+            },
+            summary=summary,
+            message=status if not exhaustion_reason else exhaustion_reason,
+        )
+
+    def _record_browse(
+        self,
+        *,
+        terminal: bool = False,
+        **payload: Any,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        self._telemetry.enqueue(dict(payload), terminal=terminal)
 
 
 # === helpers ============================================================
+
+
+def _browse_page_type(url: str) -> str:
+    path = (urlsplit(str(url or "")).path or "").lower()
+    if "/search" in path:
+        return "video_search"
+    if "/video/" in path:
+        return "video"
+    if "/user/" in path:
+        return "profile"
+    return "home" if path in {"", "/"} else "platform_page"
+
+
+def _browse_error_code(exc: Exception) -> str:
+    if isinstance(exc, LLMRouteError):
+        category = str(exc.error_category or "").strip().lower()
+        if category in PUBLIC_ERROR_MESSAGES:
+            return category
+    return "internal_error"
 
 
 async def _visible_body_text(browser: _BrowserLike) -> str:

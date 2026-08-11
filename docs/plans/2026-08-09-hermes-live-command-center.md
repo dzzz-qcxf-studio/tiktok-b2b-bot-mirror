@@ -168,11 +168,10 @@ git commit -m "feat: persist job-scoped pipeline live events"
 **文件**
 
 - 修改：`tiktok_bot_core/services/browse_agent.py`
-- 修改：`tiktok_bot_core/services/acquisition_agents.py`
-- 修改：`tiktok_bot_core/services/keyword_collector.py`
+- 修改：`tiktok_bot_core/services/acquisition_agents.py`（包含现有 `KeywordCollector` / Hermes 注入链）
 - 修改：`tiktok_bot_core/services/pipeline.py`
 - 修改测试：`tests/test_browse_agent.py`
-- 修改测试：`tests/test_keyword_collector.py`
+- 修改测试：`tests/test_keyword_collector_username.py`
 - 修改测试：`tests/test_pipeline.py`
 
 **RED**
@@ -193,7 +192,7 @@ git commit -m "feat: persist job-scoped pipeline live events"
 ```powershell
 python -X utf8 -m pytest tests/test_pipeline_jobs.py tests/test_pipeline_decisions.py `
   tests/test_pipeline_decision_policy.py tests/test_browse_agent.py `
-  tests/test_keyword_collector.py tests/test_pipeline.py -q
+  tests/test_keyword_collector_username.py tests/test_pipeline.py -q
 ```
 
 通过后更新 `docs/wiki/05-Pipeline.md` 并提交：

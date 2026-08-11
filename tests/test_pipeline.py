@@ -162,6 +162,73 @@ async def test_pipeline_collect_stage(db):
 
 
 @pytest.mark.asyncio
+async def test_acquisition_pipeline_passes_job_recorder_to_hermes(db, monkeypatch):
+    patch_global_db(db)
+    mock_llm, saved = inject_mock_llm()
+    from tiktok_bot_core.extensions.registry import register as get_registry
+    from tiktok_bot_core.services import pipeline as pipeline_module
+    from tiktok_bot_core.services.pipeline import PipelineRunContext, PipelineService
+    from tiktok_bot_core.storage.acquisition_store import AcquisitionStore
+
+    captured = {}
+    hermes = MagicMock()
+
+    def build_hermes(**kwargs):
+        captured.update(kwargs)
+        return hermes
+
+    monkeypatch.setattr(pipeline_module, "HermesEvidenceAgent", build_hermes)
+    reg = get_registry()
+    reg.collectors["keyword"] = MagicMock(
+        collect=AsyncMock(side_effect=RuntimeError("stop after wiring"))
+    )
+    reg.channels["comment"] = MagicMock(execute=AsyncMock(return_value=True))
+    reg.channels["dm"] = MagicMock(execute=AsyncMock(return_value=True))
+    context = create_run_context(db, stages=["collect"])
+    recorder = MagicMock()
+    context = PipelineRunContext(
+        job_id=context.job_id,
+        platform=context.platform,
+        account_id=context.account_id,
+        account_username=context.account_username,
+        browser_session=context.browser_session,
+        event_recorder=recorder,
+    )
+    with db.session() as session:
+        store = AcquisitionStore()
+        store.create_campaign(
+            session,
+            job_id=context.job_id,
+            platform="douyin",
+            countries=["CN"],
+            industries=["power"],
+            customer_roles=["buyer"],
+        )
+        store.create_keyword(
+            session,
+            job_id=context.job_id,
+            platform="douyin",
+            text="transformer procurement",
+        )
+
+    try:
+        service = PipelineService()
+        results = [
+            item
+            async for item in service.run(context, stages=["collect"])
+        ]
+    finally:
+        restore_llm(saved)
+        reg.collectors.clear()
+        reg.channels.clear()
+
+    assert results[0]["status"] == "error"
+    assert captured["job_id"] == context.job_id
+    assert captured["stage"] == "collect"
+    assert captured["event_recorder"] is recorder
+
+
+@pytest.mark.asyncio
 async def test_pipeline_unknown_stage(db):
     patch_global_db(db)
     mock_llm, saved = inject_mock_llm()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 import logging
 import time
 
@@ -36,6 +37,17 @@ def _seed_job(database: Database) -> str:
 def test_named_recorders_cover_five_event_families_and_bind_job(db):
     job_id = _seed_job(db)
     recorder = PipelineLiveEventRecorder(db)
+    with db.session() as session:
+        checkpoint_id = PipelineLiveStore().create_checkpoint(
+            session,
+            job_id=job_id,
+            stage="filter",
+            kind="qualification_review",
+            option_keys=("continue_with_qualified_only",),
+            default_option_key="continue_with_qualified_only",
+            context={"schemaVersion": 1, "summary": "review candidates"},
+            deadline_at=datetime.utcnow() + timedelta(seconds=10),
+        ).id
 
     results = [
         recorder.record_lifecycle(
@@ -62,7 +74,7 @@ def test_named_recorders_cover_five_event_families_and_bind_job(db):
         recorder.record_decision(
             job_id=job_id,
             stage="filter",
-            checkpoint_id="checkpoint-1",
+            checkpoint_id=checkpoint_id,
             kind="qualification_review",
             status="pending",
             default_option_key="continue_with_qualified_only",
