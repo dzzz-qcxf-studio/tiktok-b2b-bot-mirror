@@ -364,6 +364,9 @@ git commit -m "feat: add Hermes live acquisition command center"
 
 ### Task 13：后端完整回归
 
+> 实施状态：2026-08-11 已使用独立测试 worker lock 完成后端全量 **939 passed**；
+> Browse 遥测 fail-open 等值测试改用注入的固定单调时钟，消除真实墙钟粒度导致的偶发预算差异。
+
 ```powershell
 python -X utf8 -m pytest -q
 python -X utf8 -m compileall -q tiktok_bot_core tiktok_bot_api

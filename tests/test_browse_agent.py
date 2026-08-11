@@ -507,6 +507,7 @@ async def test_live_recorder_failure_does_not_change_result_or_budget():
         router=make_fake_router(decisions),
         bus=EventBus(),
         browser_factory=lambda: FakeBrowserClient(),
+        monotonic=lambda: 0.0,
     ).run(goal="baseline", platform="douyin", account_id=1)
     with_failed_recorder = await BrowseAgent(
         router=make_fake_router(decisions),
@@ -515,6 +516,7 @@ async def test_live_recorder_failure_does_not_change_result_or_budget():
         event_recorder=CapturingLiveRecorder(fail=True),
         job_id="job-fail-open",
         stage="collect",
+        monotonic=lambda: 0.0,
     ).run(goal="baseline", platform="douyin", account_id=1)
 
     assert with_failed_recorder == baseline
