@@ -54,7 +54,11 @@ class BrowserClient:
     # ===== 通用操作 =====
 
     async def navigate(self, url: str) -> None:
-        await self._page.goto(url, wait_until="domcontentloaded")
+        # Douyin/TikTok search pages continuously stream scripts and media, so
+        # DOMContentLoaded is not a reliable navigation boundary.  A committed
+        # main-document response proves that navigation succeeded; the bounded
+        # stabilization delay below remains responsible for the first render.
+        await self._page.goto(url, wait_until="commit")
         await asyncio.sleep(1.5)
 
     async def wait(self, ms: int) -> None:

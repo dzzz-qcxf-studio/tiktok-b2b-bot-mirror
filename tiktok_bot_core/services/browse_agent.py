@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urljoin, urlsplit
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from tiktok_bot_core.events.bus import Event, EventBus, EventType
 from tiktok_bot_core.llm.router import LLMRouteError, LLMRouter
 from tiktok_bot_core.services.acquisition_agents import EvidenceObservation
@@ -36,6 +38,13 @@ ALLOWED_ACTIONS: frozenset[str] = frozenset(
 _RETRYABLE_ITERATION_ERROR_CATEGORIES = frozenset(
     {"network", "timeout", "upstream_server"}
 )
+
+
+def _is_browser_action_timeout(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (asyncio.TimeoutError, TimeoutError, PlaywrightTimeoutError),
+    )
 
 
 @dataclass(frozen=True)
@@ -684,22 +693,20 @@ class BrowseAgent:
                         screenshot_hash=shot_hash,
                         rationale=action.rationale,
                     )
-                    steps.append(
-                        step
-                    )
-                    self._publish_step(
-                        platform,
-                        account_id,
-                        step,
-                        current_url=current_url,
-                        evidence_count=len(observations),
-                    )
+                    steps.append(step)
 
                     if (
                         observation is not None
                         and self._tracker is not None
                         and decision.stop_after
                     ):
+                        self._publish_step(
+                            platform,
+                            account_id,
+                            step,
+                            current_url=current_url,
+                            evidence_count=len(observations),
+                        )
                         exhaustion_reason = "max_total_observations"
                         break
 
@@ -718,12 +725,52 @@ class BrowseAgent:
                         action.action in {"navigate", "click"}
                         and pages >= self._max_pages
                     ):
+                        self._publish_step(
+                            platform,
+                            account_id,
+                            step,
+                            current_url=current_url,
+                            evidence_count=len(observations),
+                        )
                         exhaustion_reason = "max_pages"
                         break
-                    await _await_with_deadline(
-                        _execute_action(browser, action),
-                        deadline=deadline,
-                        monotonic=self._monotonic,
+                    try:
+                        await _await_with_deadline(
+                            _execute_action(browser, action),
+                            deadline=deadline,
+                            monotonic=self._monotonic,
+                        )
+                    except Exception as exc:
+                        if not _is_browser_action_timeout(exc):
+                            raise
+                        # A dynamic platform element can disappear between the
+                        # model snapshot and execution.  Treat that as one
+                        # bounded, retryable step while the overall deadline
+                        # still has time; previously extracted evidence stays
+                        # authoritative for this run.
+                        if self._monotonic() >= deadline:
+                            raise
+                        steps[-1] = BrowseStep(
+                            step=step_no,
+                            action=None,
+                            screenshot_hash=shot_hash,
+                            rationale="retryable: timeout",
+                        )
+                        self._publish_step(
+                            platform,
+                            account_id,
+                            steps[-1],
+                            current_url=current_url,
+                            evidence_count=len(observations),
+                        )
+                        continue
+
+                    self._publish_step(
+                        platform,
+                        account_id,
+                        step,
+                        current_url=current_url,
+                        evidence_count=len(observations),
                     )
 
                     after_url = str(
@@ -882,7 +929,11 @@ class BrowseAgent:
             "evidence_count": evidence_count,
         }
         if action == "error":
-            kwargs["error_code"] = "internal_error"
+            kwargs["error_code"] = (
+                "timeout"
+                if step.rationale == "retryable: timeout"
+                else "internal_error"
+            )
         else:
             kwargs["rationale"] = step.rationale
             if action == "wait":

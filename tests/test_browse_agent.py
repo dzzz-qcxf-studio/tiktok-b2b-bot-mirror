@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from tiktok_bot_core.events.bus import Event, EventBus, EventType
 from tiktok_bot_core.llm.router import LLMRouteError
@@ -278,6 +279,64 @@ async def test_agent_drives_browser_through_llm_decisions_to_done():
     assert step_events[1].payload["step"] == 2
     assert step_events[1].payload["action"] == "scroll"
     assert done_events[0].payload["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_action_timeout_is_a_bounded_step_and_preserves_prior_evidence():
+    class TimeoutClickBrowser(FakeBrowserClient):
+        async def click(self, selector: str) -> None:
+            self.calls.append(("click", (selector,)))
+            raise PlaywrightTimeoutError("element stayed hidden")
+
+    observation = {
+        "platform": "douyin",
+        "platform_user_id": "video-author-1",
+        "username": "author",
+        "source_type": "video_author",
+        "author_url": "https://www.douyin.com/user/video-author-1",
+        "source_path": ["keyword", "video", "author"],
+    }
+    router = make_fake_router([
+        _wrap_decision(FakeDecision("extract", {"observation": observation})),
+        _wrap_decision(FakeDecision("click", {"selector": "button.hidden-comment"})),
+        _wrap_decision(FakeDecision("done", {"summary": "bounded recovery"})),
+    ])
+    browser = TimeoutClickBrowser()
+    bus = EventBus()
+    recorder = CapturingLiveRecorder()
+
+    result = await BrowseAgent(
+        router=router,
+        bus=bus,
+        browser_factory=lambda: browser,
+        max_steps=3,
+        event_recorder=recorder,
+        job_id="job-timeout",
+        stage="collect",
+    ).run(goal="recover one action", platform="douyin", account_id=1)
+
+    assert result.status == "done"
+    assert result.summary == "bounded recovery"
+    assert result.steps == 3
+    assert result.steps_detail[1].action is None
+    assert result.steps_detail[1].rationale == "retryable: timeout"
+    assert [item.platform_user_id for item in result.observations] == [
+        "video-author-1"
+    ]
+    assert router.json_completion.await_count == 3
+    step_events = bus.history(EventType.BROWSE_STEP)
+    assert [event.payload["action"] for event in step_events] == [
+        "extract",
+        "invalid",
+        "done",
+    ]
+    action_calls = [
+        call for call in recorder.browse_calls
+        if call.get("step") == 2
+    ]
+    assert len(action_calls) == 1
+    assert action_calls[0]["action"] == "error"
+    assert action_calls[0]["error_code"] == "timeout"
 
 
 @pytest.mark.asyncio

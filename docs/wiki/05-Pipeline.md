@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-11（v0.7.3，Hermes 获客作战中心集成）
+> 最后更新: 2026-08-12（v0.7.4，Hermes 真实获客运行时修复）
 
 ## 单一任务入口
 
@@ -249,6 +249,22 @@ legacy Job 继续显示兼容摘要。所有存在结果的 Stage 原始 JSON �
 Smoke **142 passed**，类型检查与生产构建通过；独立复审无 Critical/Important。
 
 ## 阶段执行流程
+
+### 真实平台动态页面的有界恢复
+
+抖音/TikTok 搜索页会持续加载脚本、媒体和推荐流，`DOMContentLoaded` 不是可靠的导航完成边界。
+`BrowserClient.navigate()` 以主文档响应已经提交的 `commit` 为成功边界，再执行既有 1.5 秒稳定等待；
+DNS、连接、主文档未提交和总 deadline 超时仍会失败，BrowseAgent 的导航前后平台域名校验也保持不变。
+
+模型根据截图生成动作后，目标元素可能在执行前消失、被遮挡或保持不可见。若单次动作在总 deadline
+尚有余量时超时，该动作记为一个 `retryable: timeout` 无效步骤并进入下一轮决策；已提取的候选证据、
+页面/LLM/step 消耗与安全 URL 均保留。只有总 deadline 真正耗尽时才结束为 timeout，避免单个动态元素
+使整个关键词退化成“collector keyword metrics are missing”。
+
+2026-08-12 的真实抖音隔离验收只运行 `collect + filter`：Job
+`fafdff9b-6150-4c6f-aab9-f5182f68b8c4` 终态为 `succeeded`，阶段 01 发现并关联 20 个候选、
+20 条证据；证据不足关卡在 10 秒无人操作后由服务端选择 `continue_with_current_evidence`；阶段 02
+把 20 个资料不足候选置为 `need_enrichment`。该验收没有 strategy/outreach 阶段，因此没有评论或私信外发。
 
 ```text
 Runner 为每个 Stage: pending → running → terminal
