@@ -15,13 +15,14 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, TypeVar
 from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -55,11 +56,31 @@ MAX_AGENT_CONTENT_ITEMS = 20
 MAX_AGENT_PUBLIC_FIELD_CHARS = 1000
 MAX_AGENT_PROMPT_CHARS = 24000
 
+_ENRICHMENT_OUTPUT_SCHEMA = (
+    "Output one JSON object with exactly these keys: "
+    "schema_version (the string '1.0'), profile_summary (string), "
+    "representative_content (array of strings), business_signals (array of "
+    "strings), missing_fields (array of strings). Do not add other keys."
+)
+_QUALIFICATION_OUTPUT_SCHEMA = (
+    "Output one JSON object with exactly these keys: schema_version (the "
+    "string '1.0'), labels (array of strings), match_score (number 0..100), "
+    "confidence_score (number 0..100), positive_evidence (array of strings), "
+    "negative_evidence (array of strings), missing_fields (array of strings), "
+    "reasoning (string), suggested_status (exactly one of 'qualified', "
+    "'manual_review', 'need_enrichment', 'rejected'), hard_exclusion "
+    "(boolean), hard_exclusion_reasons (array of strings). Do not add other "
+    "keys."
+)
+
 
 class _AgentContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["1.0"] = "1.0"
+
+
+_AgentContractT = TypeVar("_AgentContractT", bound=_AgentContract)
 
 
 class ExplorationBudget(_AgentContract):
@@ -513,6 +534,37 @@ def _build_agent_prompt(
     return prompt
 
 
+async def _complete_strict_agent_contract(
+    *,
+    router: LLMRouter,
+    prompt: str,
+    contract: type[_AgentContractT],
+    schema_instruction: str,
+) -> _AgentContractT:
+    """Validate strictly and allow one public-input-only schema regeneration."""
+
+    result = await router.json_completion(prompt, route="qualification")
+    try:
+        return contract.model_validate(result)
+    except ValidationError:
+        # Never replay the rejected model output or validation details.  The
+        # second request contains only the original bounded public input and a
+        # static contract, so a malformed response cannot inject instructions.
+        _, separator, serialized_payload = prompt.partition("\n")
+        if not separator:
+            raise ValueError("agent prompt payload missing")
+        repair_prompt = _build_agent_prompt(
+            "Regenerate from the supplied public data because the previous "
+            "response did not match the required JSON contract. "
+            f"{schema_instruction}",
+            json.loads(serialized_payload),
+        )
+        repaired = await router.json_completion(
+            repair_prompt, route="qualification"
+        )
+        return contract.model_validate(repaired)
+
+
 class EnrichmentAgent:
     """Ask the qualification route to normalize public profile/content facts."""
 
@@ -544,13 +596,15 @@ class EnrichmentAgent:
         prompt = _build_agent_prompt(
             "Normalize only the supplied public profile, public content and "
             "discovery evidence. Unknown facts must stay in missing_fields. "
-            "Return EnrichmentResult schema 1.0 JSON.",
+            f"{_ENRICHMENT_OUTPUT_SCHEMA}",
             payload,
         )
-        result = await self._router.json_completion(
-            prompt, route="qualification"
+        return await _complete_strict_agent_contract(
+            router=self._router,
+            prompt=prompt,
+            contract=EnrichmentResult,
+            schema_instruction=_ENRICHMENT_OUTPUT_SCHEMA,
         )
-        return EnrichmentResult.model_validate(result)
 
 
 class QualificationAgent:
@@ -585,14 +639,16 @@ class QualificationAgent:
             "purchase-demand comments as strong positive evidence. Unknown "
             "facts belong in missing_fields, never negative_evidence. Suggest "
             "rejected only for an explicit campaign hard exclusion and include "
-            "hard_exclusion=true with reasons. Return QualificationResult "
-            "schema 1.0 JSON.",
+            "hard_exclusion=true with reasons. "
+            f"{_QUALIFICATION_OUTPUT_SCHEMA}",
             payload,
         )
-        result = await self._router.json_completion(
-            prompt, route="qualification"
+        return await _complete_strict_agent_contract(
+            router=self._router,
+            prompt=prompt,
+            contract=QualificationResult,
+            schema_instruction=_QUALIFICATION_OUTPUT_SCHEMA,
         )
-        return QualificationResult.model_validate(result)
 
 
 class CampaignStrategyAgent:

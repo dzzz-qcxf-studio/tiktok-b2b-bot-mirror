@@ -184,6 +184,159 @@ async def test_enrichment_and_qualification_agents_use_qualification_route():
     ]
 
 
+@pytest.mark.asyncio
+async def test_enrichment_agent_repairs_schema_once_without_replaying_raw_output():
+    from tiktok_bot_core.services.acquisition_agents import EnrichmentAgent
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[
+            {
+                "enriched_profile": "RAW_MODEL_CANARY",
+                "normalized_content": [],
+                "confidence": 0.8,
+            },
+            {
+                "schema_version": "1.0",
+                "profile_summary": "Electrical infrastructure contractor",
+                "representative_content": [],
+                "business_signals": ["Public project activity"],
+                "missing_fields": ["employee_count"],
+            },
+        ]
+    )
+
+    result = await EnrichmentAgent(router=router).run(
+        public_profile={"username": "grid-builder"},
+        public_content=[],
+        evidence=[],
+    )
+
+    assert result.profile_summary == "Electrical infrastructure contractor"
+    assert router.json_completion.await_count == 2
+    first_prompt = router.json_completion.await_args_list[0].args[0]
+    repair_prompt = router.json_completion.await_args_list[1].args[0]
+    for field in (
+        "schema_version",
+        "profile_summary",
+        "representative_content",
+        "business_signals",
+        "missing_fields",
+    ):
+        assert field in first_prompt
+        assert field in repair_prompt
+    assert "grid-builder" in repair_prompt
+    assert "RAW_MODEL_CANARY" not in repair_prompt
+    assert "enriched_profile" not in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_qualification_agent_repairs_schema_once_without_replaying_raw_output():
+    from tiktok_bot_core.services.acquisition_agents import (
+        EnrichmentResult,
+        QualificationAgent,
+    )
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[
+            {
+                "classification": "RAW_QUALIFICATION_CANARY",
+                "score": 88,
+            },
+            _qualification_payload(),
+        ]
+    )
+
+    result = await QualificationAgent(router=router).run(
+        campaign={"industries": ["electrical infrastructure"]},
+        public_profile={"username": "grid-builder"},
+        enrichment=EnrichmentResult(),
+        evidence=[],
+    )
+
+    assert result.suggested_status == "qualified"
+    assert router.json_completion.await_count == 2
+    first_prompt = router.json_completion.await_args_list[0].args[0]
+    repair_prompt = router.json_completion.await_args_list[1].args[0]
+    for field in (
+        "match_score",
+        "confidence_score",
+        "positive_evidence",
+        "negative_evidence",
+        "suggested_status",
+        "hard_exclusion_reasons",
+    ):
+        assert field in first_prompt
+        assert field in repair_prompt
+    for status in ("qualified", "manual_review", "need_enrichment", "rejected"):
+        assert status in first_prompt
+    assert "RAW_QUALIFICATION_CANARY" not in repair_prompt
+    assert "classification" not in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_enrichment_agent_stops_after_one_schema_repair():
+    from tiktok_bot_core.services.acquisition_agents import EnrichmentAgent
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[{"unexpected": "first"}, {"unexpected": "second"}]
+    )
+
+    with pytest.raises(ValidationError):
+        await EnrichmentAgent(router=router).run(
+            public_profile={"username": "grid-builder"},
+            public_content=[],
+            evidence=[],
+        )
+
+    assert router.json_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_qualification_agent_stops_after_one_schema_repair():
+    from tiktok_bot_core.services.acquisition_agents import (
+        EnrichmentResult,
+        QualificationAgent,
+    )
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=[{"unexpected": "first"}, {"unexpected": "second"}]
+    )
+
+    with pytest.raises(ValidationError):
+        await QualificationAgent(router=router).run(
+            campaign={},
+            public_profile={"username": "grid-builder"},
+            enrichment=EnrichmentResult(),
+            evidence=[],
+        )
+
+    assert router.json_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stage02_agents_do_not_duplicate_router_network_retries():
+    from tiktok_bot_core.llm.router import LLMRouteError
+    from tiktok_bot_core.services.acquisition_agents import EnrichmentAgent
+
+    router = MagicMock()
+    router.json_completion = AsyncMock(
+        side_effect=LLMRouteError(route="qualification", error_category="network")
+    )
+
+    with pytest.raises(LLMRouteError):
+        await EnrichmentAgent(router=router).run(
+            public_profile={"username": "grid-builder"},
+            public_content=[],
+            evidence=[],
+        )
+
+    assert router.json_completion.await_count == 1
+
+
 def test_pipeline_job_store_ai_update_does_not_touch_human_labels_or_version(db):
     from tiktok_bot_core.storage.pipeline_job_store import PipelineJobStore
     from tiktok_bot_core.models.entities import PipelineJobUser

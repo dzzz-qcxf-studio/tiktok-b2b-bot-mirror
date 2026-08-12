@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-12（v0.7.4，Hermes 真实获客运行时修复）
+> 最后更新: 2026-08-12（v0.7.5，阶段 02 严格模型契约修复）
 
 ## 单一任务入口
 
@@ -287,6 +287,8 @@ Runner 为每个 Stage: pending → running → terminal
   │       ├── 公开字段白名单 + 采购评论/来源多样性优先的 20 条证据
   │       ├── 单字段上限 + 最终 UTF-8 Prompt 24,000 字节硬上限
   │       ├── EnrichmentAgent → QualificationAgent（route=qualification）
+  │       ├── 提示显式声明 schema 1.0 完整字段、类型和资格状态枚举
+  │       ├── 仅契约校验失败时允许一次公开数据结构重生成，不回灌原始输出
   │       ├── 追加双评分、多标签、证据和缺失字段 assessment
   │       └── AI 条件更新；qualified/rejected 均只建议，人工版本变化时 stale_skipped
   │
@@ -350,6 +352,13 @@ Runner 为每个 Stage: pending → running → terminal
 执行期间的人工结论通过 CAS 获得最终优先级。阶段 03 和阶段 04 都有独立的当前 Job、
 当前平台、`qualified` 闸门，
 避免从旧策略记录或其他任务绕过复核。
+
+阶段 02 的两个 AI 契约都采用 `extra=forbid` 的 schema 1.0 严格校验。首次响应已是合法 JSON
+但字段名、类型、枚举或业务约束不匹配时，Agent 最多再发起一次结构重生成；第二次提示仅由
+同一份经过白名单、数量上限和 24,000 字节上限处理的公开输入，加静态字段契约组成，不包含
+上一次模型原文或校验错误正文。第二次仍不合法则沿既有安全路径落入 `manual_review` 或
+`need_enrichment`。`network / auth / config / circuit_open` 等路由失败不由 Agent 额外重试，
+继续服从 Router 的重试、熔断与错误分类，避免批量候选放大故障流量。
 
 全局业务页面不直接使用上一次 Job 的阶段 JSON，也不把 AI 结论反写 `User`。统一投影按
 “回复 → 已发送触达 → 最新 AI 资格 → legacy”的优先级生成展示状态；这保证当前 Pipeline
