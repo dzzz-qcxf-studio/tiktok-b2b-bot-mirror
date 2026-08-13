@@ -278,16 +278,18 @@ def test_outreach_gate_is_job_platform_and_authorization_scoped(db):
     )
 
     assert plan is not None
-    assert plan.kind == "outreach_confirmation"
-    assert plan.default_option_key == "execute_approved_outreach"
+    assert plan.kind == "strategy_review"
+    assert plan.default_option_key == "skip_outreach"
     assert plan.option_keys == (
-        "execute_approved_outreach",
-        "open_review_workbench",
+        "open_strategy_workbench",
+        "approve_all_safe_drafts",
         "skip_outreach",
+        "cancel_job",
     )
     assert plan.context["candidateCounts"] == {
         "qualified": 2,
-        "validStrategies": 1,
+        "drafts": 2,
+        "safeDrafts": 1,
     }
 
 

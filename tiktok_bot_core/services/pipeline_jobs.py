@@ -22,7 +22,10 @@ from tiktok_bot_core.browser.providers import (
 from tiktok_bot_core.models.entities import (
     PipelineJob,
     PipelineJobStage,
+    PipelineJobUser,
+    Strategy,
     TikTokAccount,
+    User,
 )
 from tiktok_bot_core.models.pipeline_states import (
     JOB_STATUS_CANCELLED,
@@ -49,6 +52,7 @@ from tiktok_bot_core.services.pipeline_decisions import DecisionGateService
 from tiktok_bot_core.services.pipeline_live_events import (
     PipelineLiveEventRecorder,
 )
+from tiktok_bot_core.services.strategy_review import StrategyReviewService
 from tiktok_bot_core.services.pipeline_concurrency import (
     ConcurrencyLease,
     PipelineConcurrencyManager,
@@ -491,6 +495,7 @@ class PipelineJobRunner:
             job_store=self.store,
             event_recorder=self.event_recorder,
         )
+        self.strategy_review = StrategyReviewService(self.database)
         # If browser cleanup cannot be confirmed, retain both handles and the
         # active account lease as an explicit in-process quarantine.  Opening a
         # second browser for the same account would be less safe than keeping
@@ -704,6 +709,41 @@ class PipelineJobRunner:
                 raise _RunnerCancellationRequested
             await reacquire_after_manual_review()
 
+        def approve_all_safe_drafts() -> None:
+            with self.database.session() as session:
+                current_job = self.store.get_job(session, job_id)
+                if current_job is None:
+                    raise PipelineJobError(
+                        "job_not_found",
+                        "Pipeline job not found",
+                    )
+                rows = session.execute(
+                    select(Strategy.id, Strategy.review_version)
+                    .join(User, User.id == Strategy.user_id)
+                    .join(
+                        PipelineJobUser,
+                        (PipelineJobUser.job_id == Strategy.job_id)
+                        & (PipelineJobUser.user_id == Strategy.user_id),
+                    )
+                    .where(
+                        Strategy.job_id == job_id,
+                        Strategy.review_status == "draft",
+                        User.platform == current_job.platform,
+                        PipelineJobUser.qualification_status == "qualified",
+                    )
+                ).all()
+                expected_versions = {
+                    int(strategy_id): int(review_version)
+                    for strategy_id, review_version in rows
+                }
+                platform = current_job.platform
+            self.strategy_review.approve_batch(
+                job_id=job_id,
+                platform=platform,
+                expected_versions=expected_versions,
+                operator="pipeline-runner",
+            )
+
         try:
             account = self._load_runnable_job_account(job_id)
             if account is None:
@@ -765,11 +805,40 @@ class PipelineJobRunner:
                             outreach_plan,
                             stage,
                         )
-                        if outreach_action == "open_review_workbench":
+                        if outreach_action in {
+                            "open_review_workbench",
+                            "open_strategy_workbench",
+                        }:
                             await await_manual_review(stage)
                             # The account, qualified set, and strategy rows may
                             # all have changed while the browser was released.
                             continue
+                        if outreach_action == "approve_all_safe_drafts":
+                            approve_all_safe_drafts()
+                            outreach_action = "execute_approved_outreach"
+                            break
+                        if outreach_action == "cancel_job":
+                            self.decision_gate.cancel_job(job_id)
+                            with self.database.session() as session:
+                                cancelled_stage = self.store.finish_stage(
+                                    session,
+                                    job_id,
+                                    stage,
+                                    STAGE_STATUS_CANCELLED,
+                                    result={"decision": "cancel_job"},
+                                )
+                            if cancelled_stage is None:
+                                raise RuntimeError(
+                                    "Could not cancel outreach stage"
+                                )
+                            self._record_stage(
+                                job_id=job_id,
+                                stage=stage,
+                                status=STAGE_STATUS_CANCELLED,
+                                previous_status=STAGE_STATUS_RUNNING,
+                            )
+                            self._finish_cancellation(job_id)
+                            return
                         if outreach_action == "skip_outreach":
                             with self.database.session() as session:
                                 finished = self.store.finish_stage(

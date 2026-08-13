@@ -122,6 +122,8 @@ class PipelineDecisionPolicy:
                 and "outreach" in tuple(job.stages_json or ())
                 and job.platform == campaign["platform"]
             )
+            if not authorized:
+                return None
             counts = self._qualification_counts(
                 session,
                 job_id=job_id,
@@ -146,6 +148,7 @@ class PipelineDecisionPolicy:
                     Strategy.job_id == job_id,
                     PipelineJobUser.qualification_status == "qualified",
                     User.platform == campaign["platform"],
+                    Strategy.review_status == "draft",
                 )
             ).all()
             valid_strategies = 0
@@ -162,37 +165,24 @@ class PipelineDecisionPolicy:
                 except Exception:
                     continue
                 valid_strategies += 1
-
-        if not authorized:
-            return self._plan(
-                kind="outreach_confirmation",
-                options=("skip_outreach",),
-                default="skip_outreach",
-                context={
-                    "summary": "Outreach authorization is unavailable",
-                    "candidateCounts": {
-                        "qualified": counts["qualified"],
-                        "validStrategies": valid_strategies,
-                    },
-                    "defaultReason": "outreach_not_authorized",
-                },
-            )
-
-        options = ["execute_approved_outreach"]
-        if counts["total"] > 0:
-            options.append("open_review_workbench")
-        options.append("skip_outreach")
+        if not strategy_rows:
+            return None
+        options = ["open_strategy_workbench"]
+        if valid_strategies:
+            options.append("approve_all_safe_drafts")
+        options.extend(("skip_outreach", "cancel_job"))
         return self._plan(
-            kind="outreach_confirmation",
+            kind="strategy_review",
             options=tuple(options),
-            default="execute_approved_outreach",
+            default="skip_outreach",
             context={
-                "summary": "Confirm outreach to the current approved set",
+                "summary": "Review strategy drafts before outreach",
                 "candidateCounts": {
                     "qualified": counts["qualified"],
-                    "validStrategies": valid_strategies,
+                    "drafts": len(strategy_rows),
+                    "safeDrafts": valid_strategies,
                 },
-                "defaultReason": "job_includes_outreach",
+                "defaultReason": "safe_skip_unreviewed_outreach",
             },
         )
 

@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-13（v0.7.8，阶段 02 候选有界并发）
+> 最后更新: 2026-08-13（v0.8.0，阶段 03 策略人工审核闸门）
 
 ## 单一任务入口
 
@@ -137,10 +137,11 @@ Task 5 已把 Gate 接入 AI 获客 Runner；legacy Job 没有 AcquisitionCampai
 - **filter 完成后**：只读取当前 Job、当前平台持久化的 `manual_review/need_enrichment` 待办；
   有待办时创建 `qualification_review`，默认 `continue_with_qualified_only`，不会修改任何候选
   `qualified/rejected` 终态。批量补资料执行器尚未实现，所以不公开对应 option；
-- **outreach 开始前**：创建 `outreach_confirmation`。只有建单包含 outreach 且 Campaign 与
-  Job 平台一致时才保持默认 `execute_approved_outreach`；执行该默认动作仍只处理当前 Job、
-  当前平台、人工 `qualified`，并逐条使用与实际 outreach 相同的严格 `StrategyResult` 校验，
-  无合法目标时安全返回零。`skip_outreach` 会直接把本阶段置为 skipped，不调用发送执行器。
+- **outreach 开始前**：若当前 AI Campaign 请求 outreach 且存在策略草案，创建
+  `strategy_review`。可选项为打开策略工作台、批量批准合法草案、安全跳过触达或取消任务，
+  服务端 10 秒默认固定为 `skip_outreach`。阶段 04 只处理当前 Job、当前平台、人工
+  `qualified` 且人工 `approved` 的策略，并再次执行严格 `StrategyResult` 校验；没有批准策略
+  时安全返回零，不调用发送执行器。
 
 普通关卡仍由服务端在 10 秒后执行默认项，因此全程无人选择也能进入终态。用户在普通关卡中
 主动选择 `open_review_workbench` 时，普通 checkpoint 立即解决并进入第二个显式人工会话；该

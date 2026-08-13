@@ -49,6 +49,7 @@ from tiktok_bot_core.models.entities import (
     PipelineJob,
     PipelineJobUser,
     PipelineSchedule,
+    Strategy,
     TikTokAccount,
     User,
 )
@@ -71,6 +72,10 @@ from tiktok_bot_core.services.acquisition_jobs import (
     validate_acquisition_stages,
 )
 from tiktok_bot_core.services.business_read_model import BusinessReadModel
+from tiktok_bot_core.services.strategy_review import (
+    StrategyReviewError,
+    StrategyReviewService,
+)
 from tiktok_bot_core.services.pipeline_scheduler import next_cron_run
 from tiktok_bot_core.browser.providers import (
     BrowserProviderRegistry,
@@ -102,6 +107,11 @@ from tiktok_bot_core.storage.llm_store import (
     LLMWriteTransactionError,
 )
 from tiktok_bot_core.storage.sqlite_store import SqliteStore
+from tiktok_bot_core.storage.strategy_review_store import (
+    StrategyReviewEdit,
+    StrategyReviewSnapshot,
+    StrategyReviewStore,
+)
 from tiktok_bot_api.pipeline_live import (
     MAX_SEQUENCE,
     PipelineActiveCheckpointResponse,
@@ -1247,6 +1257,55 @@ class CandidateLabelsRequest(ApiRequestModel):
         if any(not label or len(label) > 100 for label in normalized):
             raise ValueError("标签长度必须为 1 到 100 个字符")
         return normalized
+
+
+StrategyReviewStatus = Literal["draft", "approved", "rejected"]
+StrategyPersona = Literal[
+    "buyer", "distributor", "manufacturer", "contractor", "retailer",
+    "brand", "supplier", "competitor", "unknown",
+]
+StrategyType = Literal["soft_sell", "hard_sell", "partnership"]
+
+
+class StrategyReviewVersionRequest(ApiRequestModel):
+    review_version: int = Field(alias="reviewVersion", strict=True, ge=0, le=2**31 - 1)
+
+
+class StrategyReviewEditRequest(StrategyReviewVersionRequest):
+    persona: StrategyPersona
+    strategy_type: StrategyType = Field(alias="strategyType")
+    comment_template: str = Field(alias="commentTemplate", max_length=300)
+    dm_template: str = Field(alias="dmTemplate", max_length=600)
+    action_plan: str = Field(alias="actionPlan", max_length=1000)
+    priority: int = Field(strict=True, ge=1, le=5)
+
+
+class StrategyReviewRejectRequest(StrategyReviewVersionRequest):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("reason must not be blank")
+        return value
+
+
+class StrategyReviewBatchItem(ApiRequestModel):
+    strategy_id: int = Field(alias="strategyId", strict=True, ge=1)
+    review_version: int = Field(alias="reviewVersion", strict=True, ge=0, le=2**31 - 1)
+
+
+class StrategyReviewBatchRequest(ApiRequestModel):
+    items: list[StrategyReviewBatchItem] = Field(min_length=1, max_length=200)
+
+    @field_validator("items")
+    @classmethod
+    def reject_duplicate_strategies(cls, value):
+        if len({item.strategy_id for item in value}) != len(value):
+            raise ValueError("strategyId must be unique")
+        return value
 
 class UserResponse(BaseModel):
     id: int
@@ -2849,6 +2908,247 @@ async def get_acquisition_stage_02_summary(
                 "averageConfidenceScore": averages[1],
             },
         }
+
+
+def _strategy_review_error(exc: StrategyReviewError) -> HTTPException:
+    if exc.code == "strategy_conflict":
+        detail: dict[str, Any] = {
+            "code": exc.code,
+            "message": exc.public_message,
+            "current": _serialize_strategy_snapshot(exc.current) if exc.current else None,
+        }
+        return HTTPException(status_code=409, detail=detail)
+    status = 422 if exc.code.startswith("invalid_") else 404
+    return HTTPException(
+        status_code=status,
+        detail={"code": exc.code, "message": exc.public_message},
+    )
+
+
+def _serialize_strategy_snapshot(item: StrategyReviewSnapshot) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "jobId": item.job_id,
+        "userId": item.user_id,
+        "persona": item.persona,
+        "strategyType": item.strategy_type,
+        "commentTemplate": item.comment_template,
+        "dmTemplate": item.dm_template,
+        "actionPlan": item.action_plan,
+        "priority": item.priority,
+        "reviewStatus": item.review_status,
+        "reviewVersion": item.review_version,
+        "reviewedAt": _iso(item.reviewed_at),
+        "reviewedBy": item.reviewed_by,
+        "reviewReason": item.review_reason,
+        "updatedAt": _iso(item.updated_at),
+    }
+
+
+def _strategy_detail(session, item: StrategyReviewSnapshot) -> dict[str, Any]:
+    user = session.get(User, item.user_id)
+    link = session.get(PipelineJobUser, (item.job_id, item.user_id))
+    if user is None or link is None:
+        raise _acquisition_not_found()
+    assessment = session.scalar(
+        select(CandidateAssessment)
+        .where(
+            CandidateAssessment.job_id == item.job_id,
+            CandidateAssessment.user_id == item.user_id,
+        )
+        .order_by(CandidateAssessment.id.desc())
+        .limit(1)
+    )
+    result = _serialize_strategy_snapshot(item)
+    result["candidate"] = {
+        "userId": user.id,
+        "platform": user.platform,
+        "username": user.username,
+        "nickname": user.nickname or "",
+        "bio": user.bio or "",
+        "country": user.country or "",
+        "followerCount": user.follower_count,
+        "profileUrl": user.profile_url or "",
+        "qualificationStatus": link.qualification_status,
+        "matchScore": link.match_score,
+        "confidenceScore": link.confidence_score,
+        "labels": list(link.labels_json or []),
+    }
+    result["latestAssessment"] = _serialize_assessment(assessment)
+    return result
+
+
+def _strategy_review_scope(session, job_id: str, strategy_id: int):
+    job = _require_acquisition_job(session, job_id)
+    item = StrategyReviewStore()._current(
+        session, job_id=job_id, platform=job.platform, strategy_id=strategy_id
+    )
+    if item is None:
+        raise _acquisition_not_found()
+    return job, item
+
+
+@app.get("/api/acquisition/jobs/{job_id}/stage-03")
+async def get_acquisition_stage_03_summary(
+    job_id: str,
+    database=Depends(get_pipeline_database),
+    _current_user: str = Depends(require_user),
+):
+    with database.session() as session:
+        job = _require_acquisition_job(session, job_id)
+        qualified = session.scalar(
+            select(func.count(PipelineJobUser.user_id)).where(
+                PipelineJobUser.job_id == job_id,
+                PipelineJobUser.qualification_status == "qualified",
+            )
+        ) or 0
+        rows = session.execute(
+            select(Strategy.review_status, func.count(Strategy.id))
+            .join(User, User.id == Strategy.user_id)
+            .join(
+                PipelineJobUser,
+                (PipelineJobUser.job_id == Strategy.job_id)
+                & (PipelineJobUser.user_id == Strategy.user_id),
+            )
+            .where(
+                Strategy.job_id == job_id,
+                User.platform == job.platform,
+                PipelineJobUser.qualification_status == "qualified",
+            )
+            .group_by(Strategy.review_status)
+        ).all()
+        counts = {status: count for status, count in rows}
+        generated = sum(counts.values())
+        return {
+            "jobId": job_id,
+            "summary": {
+                "qualified": qualified,
+                "drafts": counts.get("draft", 0),
+                "approved": counts.get("approved", 0),
+                "rejected": counts.get("rejected", 0),
+                "missingStrategies": max(0, qualified - generated),
+            },
+        }
+
+
+@app.get("/api/acquisition/jobs/{job_id}/strategies")
+async def list_acquisition_strategies(
+    job_id: str,
+    review_status: Optional[StrategyReviewStatus] = Query(default=None, alias="reviewStatus"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    database=Depends(get_pipeline_database),
+    _current_user: str = Depends(require_user),
+):
+    with database.session() as session:
+        job = _require_acquisition_job(session, job_id)
+        page = StrategyReviewStore().list_strategies(
+            session, job_id=job_id, platform=job.platform,
+            review_status=review_status, limit=limit, offset=offset,
+        )
+        return {
+            "items": [_strategy_detail(session, item) for item in page.items],
+            "total": page.total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+@app.get("/api/acquisition/jobs/{job_id}/strategies/{strategy_id}")
+async def get_acquisition_strategy(
+    job_id: str,
+    strategy_id: int,
+    database=Depends(get_pipeline_database),
+    _current_user: str = Depends(require_user),
+):
+    with database.session() as session:
+        _, item = _strategy_review_scope(session, job_id, strategy_id)
+        return {"strategy": _strategy_detail(session, item)}
+
+
+def _mutate_strategy(*, database, job_id, strategy_id, operator, action, request):
+    with database.session() as session:
+        job = _require_acquisition_job(session, job_id)
+        platform = job.platform
+    service = StrategyReviewService(database)
+    try:
+        if action == "edit":
+            result = service.edit(
+                job_id=job_id, platform=platform, strategy_id=strategy_id,
+                expected_version=request.review_version,
+                changes=StrategyReviewEdit(
+                    persona=request.persona, strategy_type=request.strategy_type,
+                    comment_template=request.comment_template,
+                    dm_template=request.dm_template, action_plan=request.action_plan,
+                    priority=request.priority,
+                ), operator=operator,
+            )
+        elif action == "approve":
+            result = service.approve(
+                job_id=job_id, platform=platform, strategy_id=strategy_id,
+                expected_version=request.review_version, operator=operator,
+            )
+        else:
+            result = service.reject(
+                job_id=job_id, platform=platform, strategy_id=strategy_id,
+                expected_version=request.review_version, operator=operator,
+                reason=request.reason,
+            )
+    except StrategyReviewError as exc:
+        raise _strategy_review_error(exc) from None
+    return {"strategy": _serialize_strategy_snapshot(result.current)}
+
+
+@app.patch("/api/acquisition/jobs/{job_id}/strategies/{strategy_id}")
+async def edit_acquisition_strategy(
+    job_id: str, strategy_id: int, req: StrategyReviewEditRequest,
+    database=Depends(get_pipeline_database), current_user: str = Depends(require_user),
+):
+    return _mutate_strategy(
+        database=database, job_id=job_id, strategy_id=strategy_id,
+        operator=current_user, action="edit", request=req,
+    )
+
+
+@app.post("/api/acquisition/jobs/{job_id}/strategies/{strategy_id}/approve")
+async def approve_acquisition_strategy(
+    job_id: str, strategy_id: int, req: StrategyReviewVersionRequest,
+    database=Depends(get_pipeline_database), current_user: str = Depends(require_user),
+):
+    return _mutate_strategy(
+        database=database, job_id=job_id, strategy_id=strategy_id,
+        operator=current_user, action="approve", request=req,
+    )
+
+
+@app.post("/api/acquisition/jobs/{job_id}/strategies/{strategy_id}/reject")
+async def reject_acquisition_strategy(
+    job_id: str, strategy_id: int, req: StrategyReviewRejectRequest,
+    database=Depends(get_pipeline_database), current_user: str = Depends(require_user),
+):
+    return _mutate_strategy(
+        database=database, job_id=job_id, strategy_id=strategy_id,
+        operator=current_user, action="reject", request=req,
+    )
+
+
+@app.post("/api/acquisition/jobs/{job_id}/strategies/approve-batch")
+async def approve_acquisition_strategies_batch(
+    job_id: str, req: StrategyReviewBatchRequest,
+    database=Depends(get_pipeline_database), current_user: str = Depends(require_user),
+):
+    with database.session() as session:
+        platform = _require_acquisition_job(session, job_id).platform
+    result = StrategyReviewService(database).approve_batch(
+        job_id=job_id,
+        platform=platform,
+        expected_versions={item.strategy_id: item.review_version for item in req.items},
+        operator=current_user,
+    )
+    return {
+        "total": result.total, "approved": result.approved,
+        "skipped": result.skipped, "conflicted": result.conflicted,
+    }
 
 
 @app.get("/api/acquisition/jobs/{job_id}/candidates")

@@ -1382,7 +1382,7 @@ async def test_campaign_outreach_has_second_qualified_gate(db):
             operator="reviewer",
         )
         for user_id in (qualified_id, manual_id):
-            SqliteStore().add_strategy(
+            stored = SqliteStore().add_strategy(
                 session,
                 user_id=user_id,
                 job_id=job_id,
@@ -1393,33 +1393,20 @@ async def test_campaign_outreach_has_second_qualified_gate(db):
                 action_plan="",
                 priority=3,
             )
+            stored.review_status = "approved"
 
-    from tiktok_bot_core.extensions.registry import register as get_registry
     from tiktok_bot_core.services.pipeline import PipelineService
 
-    registry = get_registry()
-    previous_comment = registry.channels.get("comment")
-    previous_dm = registry.channels.get("dm")
-    comment_channel = MagicMock()
-    comment_channel.execute = AsyncMock(return_value=True)
-    registry.channels["comment"] = comment_channel
-    registry.channels["dm"] = MagicMock(execute=AsyncMock(return_value=True))
-    try:
-        result = await PipelineService()._run_outreach(
-            None,
-            None,
-            {"comment_limit": 10, "dm_limit": 0},
-            _context(job_id),
-        )
-    finally:
-        if previous_comment is None:
-            registry.channels.pop("comment", None)
-        else:
-            registry.channels["comment"] = previous_comment
-        if previous_dm is None:
-            registry.channels.pop("dm", None)
-        else:
-            registry.channels["dm"] = previous_dm
+    service = PipelineService()
+    comment_channel = MagicMock(execute=AsyncMock(return_value=True))
+    result = await service._run_campaign_outreach(
+        context=_context(job_id),
+        outreach_cfg={"comment_limit": 10, "dm_limit": 0},
+        comment_ch=comment_channel,
+        dm_ch=MagicMock(execute=AsyncMock(return_value=True)),
+        comment_limit=10,
+        dm_limit=0,
+    )
 
     assert result["comments_sent"] == 1
     assert comment_channel.execute.await_count == 1

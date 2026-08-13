@@ -1538,6 +1538,7 @@ class PipelineService:
                         .where(
                             StrategyModel.id > after_strategy_id,
                             StrategyModel.job_id == context.job_id,
+                            StrategyModel.review_status == "approved",
                             PipelineJobUser.job_id == context.job_id,
                             PipelineJobUser.qualification_status == "qualified",
                             UserModel.platform == context.platform,

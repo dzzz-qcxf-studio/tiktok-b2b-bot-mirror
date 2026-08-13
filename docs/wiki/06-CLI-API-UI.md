@@ -1,7 +1,7 @@
 # 06 — CLI / API / UI 三层接口
 
 > 关联: [索引](00-索引.md) | [Pipeline](05-Pipeline.md) | [Skills](08-Skills.md)
-> 最后更新: 2026-08-13（Pipeline 人工复核显式入口）
+> 最后更新: 2026-08-13（阶段 03 策略审核 API）
 
 ## 设计原则
 
@@ -95,6 +95,13 @@ PATCH  /api/acquisition/jobs/{jobId}/keywords/{id} # 更新关键词统计
 DELETE /api/acquisition/jobs/{jobId}/keywords/{id} # 无证据引用时删除
 GET    /api/acquisition/jobs/{jobId}/stage-01 # 发现阶段业务聚合
 GET    /api/acquisition/jobs/{jobId}/stage-02 # 资格阶段四状态聚合
+GET    /api/acquisition/jobs/{jobId}/stage-03 # 策略草案/批准/退回/缺失聚合
+GET    /api/acquisition/jobs/{jobId}/strategies # Job 级策略审核队列
+GET    /api/acquisition/jobs/{jobId}/strategies/{strategyId} # 策略详情
+PATCH  /api/acquisition/jobs/{jobId}/strategies/{strategyId} # 安全编辑并回到 draft
+POST   /api/acquisition/jobs/{jobId}/strategies/{strategyId}/approve # 人工批准
+POST   /api/acquisition/jobs/{jobId}/strategies/{strategyId}/reject # 人工退回
+POST   /api/acquisition/jobs/{jobId}/strategies/approve-batch # 批量批准合法草案
 GET    /api/acquisition/jobs/{jobId}/candidates # 分页候选、证据预览、最新 AI 评估
 GET    /api/acquisition/jobs/{jobId}/candidates/{userId} # 候选详情与证据
 POST   /api/acquisition/jobs/{jobId}/candidates/{userId}/approve # 人工通过

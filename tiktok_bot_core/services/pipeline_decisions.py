@@ -172,6 +172,16 @@ CHECKPOINT_DEFINITIONS: Mapping[str, CheckpointDefinition] = MappingProxyType(
             ),
             "execute_approved_outreach",
         ),
+        "strategy_review": _definition(
+            "strategy_review",
+            (
+                "open_strategy_workbench",
+                "approve_all_safe_drafts",
+                "skip_outreach",
+                "cancel_job",
+            ),
+            "skip_outreach",
+        ),
         "retryable_failure": _definition(
             "retryable_failure",
             ("retry_once", "skip_stage", "stop_job"),

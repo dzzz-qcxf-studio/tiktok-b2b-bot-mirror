@@ -403,6 +403,7 @@ def test_checkpoint_registry_is_fixed_and_defaults_are_registered():
         "insufficient_evidence",
         "qualification_review",
         "outreach_confirmation",
+        "strategy_review",
         "retryable_failure",
         "account_blocked",
     }
