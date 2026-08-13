@@ -179,6 +179,65 @@ class Message(Base):
     replies: Mapped[list["Reply"]] = relationship(back_populates="message", cascade="all, delete-orphan")
 
 
+class OutreachItem(Base):
+    """A frozen Stage 04 outreach plan item; approval is not a send."""
+
+    __tablename__ = "outreach_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "strategy_id",
+            "channel",
+            name="uq_outreach_item_job_strategy_channel",
+        ),
+        CheckConstraint(
+            "channel IN ('comment', 'dm')",
+            name="ck_outreach_item_channel",
+        ),
+        CheckConstraint(
+            "status IN ('pending_approval', 'ready', 'sending', 'sent', "
+            "'failed', 'uncertain', 'skipped', 'cancelled')",
+            name="ck_outreach_item_status",
+        ),
+        CheckConstraint(
+            "strategy_review_version >= 0",
+            name="ck_outreach_item_strategy_version",
+        ),
+        UniqueConstraint("message_id", name="uq_outreach_item_message"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("pipeline_jobs.id", ondelete="CASCADE"), index=True
+    )
+    strategy_id: Mapped[int] = mapped_column(
+        ForeignKey("strategies.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    strategy_review_version: Mapped[int] = mapped_column(Integer)
+    platform: Mapped[str] = mapped_column(String(20), index=True)
+    channel: Mapped[str] = mapped_column(String(20), index=True)
+    target_username: Mapped[str] = mapped_column(String(100))
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(24), default="pending_approval", server_default="pending_approval", index=True
+    )
+    message_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    authorized_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    authorized_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class Reply(Base):
     """回复记录表"""
     __tablename__ = "replies"

@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-13（v0.8.0，阶段 03 策略人工审核闸门）
+> 最后更新: 2026-08-14（v0.8.1，阶段 04 持久待触达队列 Gate A）
 
 ## 单一任务入口
 
@@ -265,6 +265,23 @@ AI 获客 Job 的策略阶段显示 qualified、draft、approved、rejected 和�
 后进入无自动 timeout 的人工会话，完成时复用既有 `review-complete`。页面不新增第二条 SSE，
 技术 JSON 仍只保留在唯一诊断折叠区。
 
+### 阶段 04：持久待触达队列（Gate A）
+
+策略 `approved` 只代表话术审核通过，不代表允许发送。当前版本已增加 Job-scoped
+`outreach_items` 计划层：`prepare()` 只把当前 Job、当前平台、人工 `qualified`、人工
+`approved` 且再次通过严格 `StrategyResult` 的策略投影成按“策略 × 渠道”唯一的
+`pending_approval` 项，并冻结策略审核版本、目标用户名、渠道和待发内容。
+
+授权前会再次复核策略状态、版本、候选资格、平台和冻结内容；合法项经 CAS 进入 `ready`，
+执行器只能 CAS 领取为 `sending`。结果收口为 `sent/failed/uncertain`，其中 `sent` 与
+`uncertain` 均不自动重试；人工跳过、服务端默认跳过和 Job 取消分别落安全终态及固定公共
+错误码，不保存浏览器异常正文。策略在尚未执行时重新审核，可安全刷新冻结快照；已发送或
+无法确认的记录不会被刷新或重开。
+
+本 Gate 只交付模型、Store 和领域 Service，没有连接 Runner、API、UI 或 Channel。因此当前
+生产管线仍未切换到新队列执行路径，也不会因为本 Gate 的 `prepare/authorize` 自身产生真实
+评论或私信；双重授权 Runner 和可视化队列由后续 Gate 04-B/04-C 接入。
+
 ## 阶段执行流程
 
 ### 真实平台动态页面的有界恢复
@@ -315,13 +332,12 @@ Runner 为每个 Stage: pending → running → terminal
   │   ├── CampaignStrategyAgent 严格校验；模型自由话术替换为固定中性模板
   │   └── 合法结果写入 strategies.job_id；Schema/安全失败不落库
   │
-  ├── 阶段4 _run_outreach:
-  │   ├── JOIN 当前 Job 的 strategies × users；Campaign 再次检查 qualified
-  │   ├── Campaign 发送前重新用 StrategyResult 校验已落库模板
-  │   ├── 发送前预留 messages(status=sending)
-  │   ├── CommentChannel.execute(target, template)
-  │   ├── DMChannel.execute(target, template)
-  │   └── 成功→sent；异常→uncertain（不会自动重复触达）
+  ├── 阶段4 _run_outreach（Gate 04-A 已有队列底座，Runner 切换待 Gate 04-B）:
+  │   ├── prepare 当前 Job 的 approved + qualified 安全策略为 pending_approval
+  │   ├── 显式授权后 CAS 为 ready；执行器只能领取为 sending
+  │   ├── 发送前再次核对平台、资格、策略版本和冻结内容
+  │   ├── 实际执行才创建 messages 并调用 CommentChannel / DMChannel
+  │   └── sent/failed/uncertain 安全收口；sent/uncertain 不自动重试
   │
   ├── 阶段5 _run_report:
   │   ├── 阶段结果按 Job 隔离
