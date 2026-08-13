@@ -526,6 +526,45 @@ export interface AcquisitionStage02Response {
   summary: AcquisitionStage02Summary
 }
 
+export type StrategyReviewStatus = 'draft' | 'approved' | 'rejected'
+export type StrategyPersona = 'buyer' | 'distributor' | 'manufacturer' | 'contractor' | 'retailer' | 'brand' | 'supplier' | 'competitor' | 'unknown'
+export type StrategyType = 'soft_sell' | 'hard_sell' | 'partnership'
+
+export interface AcquisitionStage03Summary {
+  qualified: number
+  drafts: number
+  approved: number
+  rejected: number
+  missingStrategies: number
+}
+export interface AcquisitionStage03Response { jobId: string; summary: AcquisitionStage03Summary }
+export interface StrategyCandidate {
+  userId: number; platform: PipelinePlatform; username: string; nickname: string; bio: string
+  country: string; followerCount: number; profileUrl: string; qualificationStatus: CandidateQualificationStatus
+  matchScore: number | null; confidenceScore: number | null; labels: string[]
+}
+export interface AcquisitionStrategy {
+  id: number; jobId: string; userId: number; persona: StrategyPersona; strategyType: StrategyType
+  commentTemplate: string; dmTemplate: string; actionPlan: string; priority: number
+  reviewStatus: StrategyReviewStatus; reviewVersion: number; reviewedAt: string | null
+  reviewedBy: string | null; reviewReason: string | null; updatedAt: string | null
+  candidate?: StrategyCandidate; latestAssessment?: CandidateAssessment | null
+}
+export interface StrategyListParams { reviewStatus?: StrategyReviewStatus; limit?: number; offset?: number }
+export interface StrategyListResponse { items: AcquisitionStrategy[]; total: number; limit: number; offset: number }
+export interface StrategyResponse { strategy: AcquisitionStrategy }
+export interface StrategyEditPayload {
+  reviewVersion: number; persona: StrategyPersona; strategyType: StrategyType; commentTemplate: string
+  dmTemplate: string; actionPlan: string; priority: number
+}
+export interface StrategyVersionPayload { reviewVersion: number }
+export interface StrategyRejectPayload extends StrategyVersionPayload { reason: string }
+export interface StrategyBatchPayload { items: Array<{ strategyId: number; reviewVersion: number }> }
+export interface StrategyBatchResponse { total: number; approved: number; skipped: number; conflicted: number }
+export interface StrategyConflictDetail {
+  code?: string; message?: string; current?: AcquisitionStrategy | null
+}
+
 export interface CandidateAssessment {
   id: number
   labels: string[]

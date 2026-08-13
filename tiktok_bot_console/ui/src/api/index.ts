@@ -16,6 +16,15 @@ import type {
   AcquisitionPageParams,
   AcquisitionStage01Response,
   AcquisitionStage02Response,
+  AcquisitionStage03Response,
+  StrategyBatchPayload,
+  StrategyBatchResponse,
+  StrategyEditPayload,
+  StrategyListParams,
+  StrategyListResponse,
+  StrategyRejectPayload,
+  StrategyResponse,
+  StrategyVersionPayload,
   CandidateLabelsPayload,
   CandidateResponse,
   CandidateReviewAuditListResponse,
@@ -310,6 +319,20 @@ const realApi = {
     api.get<AcquisitionStage02Response>(
       `/api/acquisition/jobs/${encodeURIComponent(jobId)}/stage-02`,
     ),
+  getAcquisitionStage03: (jobId: string, signal?: AbortSignal) =>
+    api.get<AcquisitionStage03Response>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/stage-03`, { signal }),
+  listAcquisitionStrategies: (jobId: string, params: StrategyListParams = {}, signal?: AbortSignal) =>
+    api.get<StrategyListResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies`, { params, signal }),
+  getAcquisitionStrategy: (jobId: string, strategyId: number, signal?: AbortSignal) =>
+    api.get<StrategyResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies/${strategyId}`, { signal }),
+  editAcquisitionStrategy: (jobId: string, strategyId: number, payload: StrategyEditPayload, signal?: AbortSignal) =>
+    api.patch<StrategyResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies/${strategyId}`, payload, { signal }),
+  approveAcquisitionStrategy: (jobId: string, strategyId: number, payload: StrategyVersionPayload, signal?: AbortSignal) =>
+    api.post<StrategyResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies/${strategyId}/approve`, payload, { signal }),
+  rejectAcquisitionStrategy: (jobId: string, strategyId: number, payload: StrategyRejectPayload, signal?: AbortSignal) =>
+    api.post<StrategyResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies/${strategyId}/reject`, payload, { signal }),
+  approveAcquisitionStrategiesBatch: (jobId: string, payload: StrategyBatchPayload, signal?: AbortSignal) =>
+    api.post<StrategyBatchResponse>(`/api/acquisition/jobs/${encodeURIComponent(jobId)}/strategies/approve-batch`, payload, { signal }),
   listAcquisitionCandidates: (
     jobId: string,
     params: AcquisitionCandidateListParams = {},
@@ -811,6 +834,13 @@ const wrapped = {
   deleteAcquisitionKeyword: realApi.deleteAcquisitionKeyword,
   getAcquisitionStage01: realApi.getAcquisitionStage01,
   getAcquisitionStage02: realApi.getAcquisitionStage02,
+  getAcquisitionStage03: realApi.getAcquisitionStage03,
+  listAcquisitionStrategies: realApi.listAcquisitionStrategies,
+  getAcquisitionStrategy: realApi.getAcquisitionStrategy,
+  editAcquisitionStrategy: realApi.editAcquisitionStrategy,
+  approveAcquisitionStrategy: realApi.approveAcquisitionStrategy,
+  rejectAcquisitionStrategy: realApi.rejectAcquisitionStrategy,
+  approveAcquisitionStrategiesBatch: realApi.approveAcquisitionStrategiesBatch,
   listAcquisitionCandidates: realApi.listAcquisitionCandidates,
   getAcquisitionCandidate: realApi.getAcquisitionCandidate,
   approveAcquisitionCandidate: realApi.approveAcquisitionCandidate,
@@ -899,6 +929,13 @@ export const updateAcquisitionKeyword = wrapped.updateAcquisitionKeyword
 export const deleteAcquisitionKeyword = wrapped.deleteAcquisitionKeyword
 export const getAcquisitionStage01 = wrapped.getAcquisitionStage01
 export const getAcquisitionStage02 = wrapped.getAcquisitionStage02
+export const getAcquisitionStage03 = wrapped.getAcquisitionStage03
+export const listAcquisitionStrategies = wrapped.listAcquisitionStrategies
+export const getAcquisitionStrategy = wrapped.getAcquisitionStrategy
+export const editAcquisitionStrategy = wrapped.editAcquisitionStrategy
+export const approveAcquisitionStrategy = wrapped.approveAcquisitionStrategy
+export const rejectAcquisitionStrategy = wrapped.rejectAcquisitionStrategy
+export const approveAcquisitionStrategiesBatch = wrapped.approveAcquisitionStrategiesBatch
 export const listAcquisitionCandidates = wrapped.listAcquisitionCandidates
 export const getAcquisitionCandidate = wrapped.getAcquisitionCandidate
 export const approveAcquisitionCandidate = wrapped.approveAcquisitionCandidate

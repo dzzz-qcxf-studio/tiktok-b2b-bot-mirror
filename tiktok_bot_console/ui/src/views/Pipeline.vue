@@ -134,6 +134,15 @@
                 {{ $t('pipeline.reviewWorkbench.openQueue') }}
               </button>
               <button
+                v-if="isSelectedAcquisitionJob && selectedJob.requestedStages.includes('strategy')"
+                class="btn primary"
+                type="button"
+                data-testid="open-strategy-review-header"
+                @click="openStrategyReview(selectedJob.id)"
+              >
+                {{ $t('pipeline.strategyWorkbench.open') }}
+              </button>
+              <button
                 v-if="canCancel"
                 class="btn danger"
                 type="button"
@@ -239,6 +248,14 @@
                   :refresh-token="stageRefreshToken"
                   @filter-candidates="filter => openCandidateReview(selectedJob!.id, filter)"
                 />
+                <StageStrategyResult
+                  v-else-if="isSelectedAcquisitionJob && stage.stage === 'strategy'"
+                  :job-id="selectedJob.id"
+                  :stage-status="stage.status"
+                  :legacy="false"
+                  :refresh-token="stageRefreshToken"
+                  @open-workbench="openStrategyReview"
+                />
                 <p v-else-if="!isSelectedAcquisitionJob && hasResult(stage.result)" class="legacy-stage-summary">
                   {{ formatLegacySummary(stage.result) }}
                 </p>
@@ -268,6 +285,16 @@
       @candidate-updated="handleReviewDataChanged(reviewDrawerJobId)"
       @review-complete="handleReviewComplete(reviewDrawerJobId)"
     />
+    <StrategyReviewDrawer
+      v-if="strategyDrawerJobId"
+      :key="strategyDrawerJobId"
+      :open="strategyDrawerOpen"
+      :job-id="strategyDrawerJobId"
+      :manual-checkpoint="strategyManualCheckpoint"
+      @close="closeStrategyDrawer"
+      @strategy-updated="handleStrategyDataChanged(strategyDrawerJobId)"
+      @review-complete="handleStrategyReviewComplete(strategyDrawerJobId)"
+    />
   </div>
 </template>
 
@@ -296,6 +323,8 @@ import CandidateReviewDrawer from '../components/CandidateReviewDrawer.vue'
 import HermesMissionMonitor from '../components/HermesMissionMonitor.vue'
 import StageDiscoveryResult from '../components/StageDiscoveryResult.vue'
 import StageQualificationResult from '../components/StageQualificationResult.vue'
+import StageStrategyResult from '../components/StageStrategyResult.vue'
+import StrategyReviewDrawer from '../components/StrategyReviewDrawer.vue'
 
 interface SocialAccount {
   id: number
@@ -335,6 +364,9 @@ const reviewDrawerOpen = ref(false)
 const reviewDrawerJobId = ref('')
 const reviewFilter = ref<AcquisitionCandidateListParams>({})
 const reviewManualCheckpoint = ref<PipelineDecisionCheckpoint | null>(null)
+const strategyDrawerOpen = ref(false)
+const strategyDrawerJobId = ref('')
+const strategyManualCheckpoint = ref<PipelineDecisionCheckpoint | null>(null)
 let pollTimer: number | null = null
 let historyRequestToken = 0
 let detailRequestToken = 0
@@ -411,8 +443,23 @@ function closeReviewDrawer() {
   reviewManualCheckpoint.value = null
 }
 
+function closeStrategyDrawer() {
+  strategyDrawerOpen.value = false
+  strategyDrawerJobId.value = ''
+  strategyManualCheckpoint.value = null
+}
+
+function openStrategyReview(jobId: string, checkpoint: PipelineDecisionCheckpoint | null = null) {
+  if (!isSelectedAcquisitionJob.value || selectedJobId.value !== jobId) return
+  closeReviewDrawer()
+  strategyDrawerJobId.value = jobId
+  strategyManualCheckpoint.value = checkpoint
+  strategyDrawerOpen.value = true
+}
+
 function openCandidateReview(jobId: string, filter: AcquisitionCandidateListParams) {
   if (!isSelectedAcquisitionJob.value || selectedJobId.value !== jobId) return
+  closeStrategyDrawer()
   reviewDrawerJobId.value = jobId
   reviewFilter.value = { ...filter }
   reviewManualCheckpoint.value = null
@@ -425,6 +472,10 @@ function openReviewWorkbench(jobId: string, checkpoint: PipelineDecisionCheckpoi
     || selectedJobId.value !== jobId
     || checkpoint.jobId !== jobId
   ) return
+  if (checkpoint.stage === 'outreach' || selectedJob.value?.currentStage === 'outreach') {
+    openStrategyReview(jobId, checkpoint)
+    return
+  }
   reviewDrawerJobId.value = jobId
   reviewFilter.value = {}
   reviewManualCheckpoint.value = checkpoint
@@ -440,6 +491,19 @@ async function handleReviewDataChanged(jobId: string) {
 async function handleReviewComplete(jobId: string) {
   if (!jobId || selectedJobId.value !== jobId) return
   closeReviewDrawer()
+  stageRefreshToken.value += 1
+  await refreshSelectedJobDetail()
+}
+
+async function handleStrategyDataChanged(jobId: string) {
+  if (!jobId || selectedJobId.value !== jobId) return
+  stageRefreshToken.value += 1
+  await refreshSelectedJobDetail()
+}
+
+async function handleStrategyReviewComplete(jobId: string) {
+  if (!jobId || selectedJobId.value !== jobId) return
+  closeStrategyDrawer()
   stageRefreshToken.value += 1
   await refreshSelectedJobDetail()
 }
@@ -473,6 +537,7 @@ async function refreshJobs(showLoading = true) {
 
 async function selectJob(job: PipelineJob) {
   closeReviewDrawer()
+  closeStrategyDrawer()
   stageRefreshToken.value = 0
   selectedJobId.value = job.id
   selectedJob.value = job

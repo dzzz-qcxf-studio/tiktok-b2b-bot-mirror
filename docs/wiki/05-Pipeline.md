@@ -254,6 +254,17 @@ legacy Job 继续显示兼容摘要。所有存在结果的 Stage 原始 JSON �
 折叠区，不再分散在每个阶段主内容中。H4-D 四组专项 **53 passed**，Pipeline 集成专项 **21 passed**，
 Smoke **142 passed**，类型检查与生产构建通过；独立复审无 Critical/Important。
 
+### 阶段 03：策略审核工作台
+
+AI 获客 Job 的策略阶段显示 qualified、draft、approved、rejected 和缺少策略五项业务指标，
+并从详情顶部或阶段卡进入同一 Job-scoped 策略工作台。工作台提供分页队列、策略六字段编辑、
+逐条批准/退回及批量批准；所有写操作携带 `reviewVersion`，成功后权威重读，409 使用服务端
+当前版本。切换 Job、策略、关闭或卸载会取消旧请求。
+
+移动端工作台为全屏单栏。普通 `strategy_review` 关卡仍由 Hermes 监控处理；选择打开工作台
+后进入无自动 timeout 的人工会话，完成时复用既有 `review-complete`。页面不新增第二条 SSE，
+技术 JSON 仍只保留在唯一诊断折叠区。
+
 ## 阶段执行流程
 
 ### 真实平台动态页面的有界恢复
