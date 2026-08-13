@@ -13,6 +13,7 @@ from tiktok_bot_core.models.entities import (
     Message,
     PipelineJobUser,
     Strategy,
+    StrategyReviewAudit,
     TikTokAccount,
     User,
 )
@@ -21,6 +22,7 @@ from tiktok_bot_core.models.entities import (
 MIGRATABLE_MODELS = (
     User,
     Strategy,
+    StrategyReviewAudit,
     Message,
     TikTokAccount,
     PipelineJobUser,

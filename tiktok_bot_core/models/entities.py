@@ -105,6 +105,51 @@ class Strategy(Base):
     job: Mapped[Optional["PipelineJob"]] = relationship(back_populates="strategies")
 
 
+class StrategyReviewAudit(Base):
+    """Bounded, credential-free audit trail for a strategy review mutation."""
+
+    __tablename__ = "strategy_review_audits"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('edit', 'approve', 'reject')",
+            name="ck_strategy_review_audit_action",
+        ),
+        CheckConstraint(
+            "before_status IN ('draft', 'approved', 'rejected')",
+            name="ck_strategy_review_audit_before_status",
+        ),
+        CheckConstraint(
+            "after_status IN ('draft', 'approved', 'rejected')",
+            name="ck_strategy_review_audit_after_status",
+        ),
+        CheckConstraint(
+            "before_version >= 0 AND after_version > before_version",
+            name="ck_strategy_review_audit_versions",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("pipeline_jobs.id", ondelete="CASCADE"), index=True
+    )
+    strategy_id: Mapped[int] = mapped_column(
+        ForeignKey("strategies.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(20), index=True)
+    before_status: Mapped[str] = mapped_column(String(20))
+    after_status: Mapped[str] = mapped_column(String(20))
+    before_version: Mapped[int] = mapped_column(Integer)
+    after_version: Mapped[int] = mapped_column(Integer)
+    operator: Mapped[str] = mapped_column(String(100))
+    reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+
+
 class Message(Base):
     """消息记录表（评论/私信）"""
     __tablename__ = "messages"
