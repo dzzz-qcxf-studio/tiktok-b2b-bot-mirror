@@ -118,6 +118,12 @@ class SqliteStore:
             if existing is not None:
                 for key, value in kwargs.items():
                     setattr(existing, key, value)
+                existing.review_status = "draft"
+                existing.review_version += 1
+                existing.reviewed_at = None
+                existing.reviewed_by = None
+                existing.review_reason = None
+                existing.updated_at = datetime.utcnow()
                 session.flush()
                 return existing
         strategy = Strategy(**kwargs)
