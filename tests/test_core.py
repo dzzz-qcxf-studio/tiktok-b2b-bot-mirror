@@ -171,6 +171,16 @@ def test_settings_defaults():
     assert s.llm_provider == "deepseek"
     assert isinstance(s.tiktok_keywords, list)
     assert len(s.tiktok_keywords) > 0
+    assert s.stage02_candidate_concurrency == 3
+
+
+@pytest.mark.parametrize("value", [0, 9])
+def test_stage02_candidate_concurrency_rejects_unsafe_bounds(value):
+    from pydantic import ValidationError
+    from tiktok_bot_core.settings import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(stage02_candidate_concurrency=value)
 
 
 def test_llm_json_extraction():

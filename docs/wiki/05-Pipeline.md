@@ -1,7 +1,7 @@
 # 05 — Pipeline 编排
 
 > 关联: [索引](00-索引.md) | [Plugin层](04-Plugin层.md) | [CLI-API-UI](06-CLI-API-UI.md)
-> 最后更新: 2026-08-13（v0.7.7，人工复核入口可发现性修复）
+> 最后更新: 2026-08-13（v0.7.8，阶段 02 候选有界并发）
 
 ## 单一任务入口
 
@@ -364,6 +364,11 @@ Runner 为每个 Stage: pending → running → terminal
 上一次模型原文或校验错误正文。第二次仍不合法则沿既有安全路径落入 `manual_review` 或
 `need_enrichment`。`network / auth / config / circuit_open` 等路由失败不由 Agent 额外重试，
 继续服从 Router 的重试、熔断与错误分类，避免批量候选放大故障流量。
+
+阶段 02 的模型等待按候选有界并发执行，`STAGE02_CANDIDATE_CONCURRENCY` 默认 3，合法范围
+1..8。每个候选内部仍严格顺序执行资料补全和资格建议；数据库写入使用独立短事务，不共享
+SQLAlchemy Session。并发不会放宽 `reviewVersion` CAS，也不会允许 AI 直接写入人工
+`qualified/rejected` 终态。发生取消或阶段异常时，尚未完成的候选任务会统一取消并回收。
 
 全局业务页面不直接使用上一次 Job 的阶段 JSON，也不把 AI 结论反写 `User`。统一投影按
 “回复 → 已发送触达 → 最新 AI 资格 → legacy”的优先级生成展示状态；这保证当前 Pipeline

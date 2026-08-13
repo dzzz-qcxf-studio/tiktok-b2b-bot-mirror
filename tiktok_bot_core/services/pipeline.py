@@ -993,6 +993,148 @@ class PipelineService:
         router = get_llm_client()
         enrichment_agent = EnrichmentAgent(router=router)
         qualification_agent = QualificationAgent(router=router)
+        candidate_semaphore = asyncio.Semaphore(
+            self.settings.stage02_candidate_concurrency
+        )
+
+        async def process_candidate(candidate):
+            (
+                user_id,
+                review_version,
+                starting_status,
+                starting_match_score,
+                starting_confidence_score,
+                public_profile,
+                evidence,
+            ) = candidate
+            try:
+                enrichment = await enrichment_agent.run(
+                    public_profile=public_profile,
+                    public_content=[],
+                    evidence=evidence,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stage 02 enrichment failed safely for user_id=%s: %s",
+                    user_id,
+                    type(exc).__name__,
+                )
+                with self.db.session() as session:
+                    updated = self.job_store.update_ai_qualification(
+                        session,
+                        context.job_id,
+                        user_id,
+                        qualification_status="need_enrichment",
+                        expected_review_version=review_version,
+                        expected_qualification_status=starting_status,
+                    )
+                    actual_status = (
+                        "need_enrichment"
+                        if updated
+                        else session.get(
+                            PipelineJobUser, (context.job_id, user_id)
+                        ).qualification_status
+                    )
+                return actual_status, not updated
+
+            try:
+                assessment = await qualification_agent.run(
+                    campaign=campaign,
+                    public_profile=public_profile,
+                    enrichment=enrichment,
+                    evidence=evidence,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stage 02 qualification failed safely for user_id=%s: %s",
+                    user_id,
+                    type(exc).__name__,
+                )
+                with self.db.session() as session:
+                    updated = self.job_store.update_ai_qualification(
+                        session,
+                        context.job_id,
+                        user_id,
+                        qualification_status="manual_review",
+                        expected_review_version=review_version,
+                        expected_qualification_status=starting_status,
+                    )
+                    actual_status = (
+                        "manual_review"
+                        if updated
+                        else session.get(
+                            PipelineJobUser, (context.job_id, user_id)
+                        ).qualification_status
+                    )
+                return actual_status, not updated
+
+            target_status = assessment.suggested_status
+            if target_status in {"qualified", "rejected"}:
+                target_status = "manual_review"
+            with self.db.session() as session:
+                missing_fields = tuple(
+                    dict.fromkeys(
+                        (
+                            *enrichment.missing_fields,
+                            *assessment.missing_fields,
+                        )
+                    )
+                )
+                acquisition.create_assessment(
+                    session,
+                    job_id=context.job_id,
+                    user_id=user_id,
+                    labels=assessment.labels,
+                    match_score=assessment.match_score,
+                    confidence_score=assessment.confidence_score,
+                    positive_evidence=assessment.positive_evidence,
+                    negative_evidence=assessment.negative_evidence,
+                    missing_fields=missing_fields,
+                    reasoning=assessment.reasoning,
+                    suggested_status=assessment.suggested_status,
+                    schema_version=assessment.schema_version,
+                    model_metadata={
+                        "hardExclusion": assessment.hard_exclusion,
+                        "hardExclusionReasons": list(
+                            assessment.hard_exclusion_reasons
+                        ),
+                    },
+                )
+                updated = self.job_store.update_ai_qualification(
+                    session,
+                    context.job_id,
+                    user_id,
+                    qualification_status=target_status,
+                    match_score=assessment.match_score,
+                    confidence_score=assessment.confidence_score,
+                    category=(
+                        assessment.labels[0]
+                        if assessment.labels
+                        else "unknown"
+                    ),
+                    expected_review_version=review_version,
+                    expected_qualification_status=starting_status,
+                )
+                actual_status = (
+                    target_status
+                    if updated
+                    else session.get(
+                        PipelineJobUser, (context.job_id, user_id)
+                    ).qualification_status
+                )
+                if not updated:
+                    current_link = session.get(
+                        PipelineJobUser, (context.job_id, user_id)
+                    )
+                    current_link.match_score = starting_match_score
+                    current_link.confidence_score = starting_confidence_score
+                    session.flush()
+            return actual_status, not updated
+
+        async def process_candidate_bounded(candidate):
+            async with candidate_semaphore:
+                return await process_candidate(candidate)
+
         after_user_id = 0
         page_size = 100
         while True:
@@ -1052,150 +1194,21 @@ class PipelineService:
                 ]
             counters["total"] += len(candidates)
 
-            for (
-                user_id,
-                review_version,
-                starting_status,
-                starting_match_score,
-                starting_confidence_score,
-                public_profile,
-                evidence,
-            ) in candidates:
-                try:
-                    enrichment = await enrichment_agent.run(
-                        public_profile=public_profile,
-                        public_content=[],
-                        evidence=evidence,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Stage 02 enrichment failed safely for user_id=%s: %s",
-                        user_id,
-                        type(exc).__name__,
-                    )
-                    with self.db.session() as session:
-                        updated = self.job_store.update_ai_qualification(
-                            session,
-                            context.job_id,
-                            user_id,
-                            qualification_status="need_enrichment",
-                            expected_review_version=review_version,
-                            expected_qualification_status=starting_status,
-                        )
-                        actual_status = (
-                            "need_enrichment"
-                            if updated
-                            else session.get(
-                                PipelineJobUser, (context.job_id, user_id)
-                            ).qualification_status
-                        )
-                    if not updated:
-                        counters["stale_skipped"] += 1
-                    counters[actual_status] += 1
-                    continue
-
-                try:
-                    assessment = await qualification_agent.run(
-                        campaign=campaign,
-                        public_profile=public_profile,
-                        enrichment=enrichment,
-                        evidence=evidence,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Stage 02 qualification failed safely for user_id=%s: %s",
-                        user_id,
-                        type(exc).__name__,
-                    )
-                    with self.db.session() as session:
-                        updated = self.job_store.update_ai_qualification(
-                            session,
-                            context.job_id,
-                            user_id,
-                            qualification_status="manual_review",
-                            expected_review_version=review_version,
-                            expected_qualification_status=starting_status,
-                        )
-                        actual_status = (
-                            "manual_review"
-                            if updated
-                            else session.get(
-                                PipelineJobUser, (context.job_id, user_id)
-                            ).qualification_status
-                        )
-                    if not updated:
-                        counters["stale_skipped"] += 1
-                    counters[actual_status] += 1
-                    continue
-
-                target_status = assessment.suggested_status
-                if target_status == "qualified":
-                    target_status = "manual_review"
-                elif target_status == "rejected":
-                    target_status = "manual_review"
-                with self.db.session() as session:
-                    missing_fields = tuple(
-                        dict.fromkeys(
-                            (
-                                *enrichment.missing_fields,
-                                *assessment.missing_fields,
-                            )
-                        )
-                    )
-                    acquisition.create_assessment(
-                        session,
-                        job_id=context.job_id,
-                        user_id=user_id,
-                        labels=assessment.labels,
-                        match_score=assessment.match_score,
-                        confidence_score=assessment.confidence_score,
-                        positive_evidence=assessment.positive_evidence,
-                        negative_evidence=assessment.negative_evidence,
-                        missing_fields=missing_fields,
-                        reasoning=assessment.reasoning,
-                        suggested_status=assessment.suggested_status,
-                        schema_version=assessment.schema_version,
-                        model_metadata={
-                            "hardExclusion": assessment.hard_exclusion,
-                            "hardExclusionReasons": list(
-                                assessment.hard_exclusion_reasons
-                            ),
-                        },
-                    )
-                    updated = self.job_store.update_ai_qualification(
-                        session,
-                        context.job_id,
-                        user_id,
-                        qualification_status=target_status,
-                        match_score=assessment.match_score,
-                        confidence_score=assessment.confidence_score,
-                        category=(
-                            assessment.labels[0]
-                            if assessment.labels
-                            else "unknown"
-                        ),
-                        expected_review_version=review_version,
-                        expected_qualification_status=starting_status,
-                    )
-                    actual_status = (
-                        target_status
-                        if updated
-                        else session.get(
-                            PipelineJobUser, (context.job_id, user_id)
-                        ).qualification_status
-                    )
-                    if not updated:
-                        current_link = session.get(
-                            PipelineJobUser, (context.job_id, user_id)
-                        )
-                        current_link.match_score = starting_match_score
-                        current_link.confidence_score = (
-                            starting_confidence_score
-                        )
-                        session.flush()
-                if not updated:
-                    counters["stale_skipped"] += 1
+            tasks = [
+                asyncio.create_task(process_candidate_bounded(candidate))
+                for candidate in candidates
+            ]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            for actual_status, stale_skipped in results:
                 counters[actual_status] += 1
+                if stale_skipped:
+                    counters["stale_skipped"] += 1
         return counters
 
     # ===== 阶段 3: 策略制定 =====

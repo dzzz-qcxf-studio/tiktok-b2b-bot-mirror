@@ -53,6 +53,7 @@ class Settings(BaseSettings):
 
     # === Pipeline ===
     pipeline_stages: list[str] = Field(default_factory=lambda: ["collect", "filter", "strategy", "outreach", "report"])
+    stage02_candidate_concurrency: int = Field(default=3, ge=1, le=8)
 
     @property
     def data_dir(self) -> Path:

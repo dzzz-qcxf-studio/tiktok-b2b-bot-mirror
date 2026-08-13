@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
+from types import SimpleNamespace
+import asyncio
 import tempfile
 
 import pytest
@@ -1170,6 +1172,77 @@ async def test_campaign_filter_processes_more_than_legacy_200_limit(
     )
     assert result["total"] == 205
     assert result["manual_review"] == 205
+
+
+@pytest.mark.asyncio
+async def test_campaign_filter_runs_candidates_with_bounded_concurrency(
+    db, monkeypatch
+):
+    _patch_global_db(db)
+    job_id, _ = _campaign_candidate(db, username="candidate-concurrent-0")
+    for index in range(1, 4):
+        _add_linked_user(
+            db,
+            job_id=job_id,
+            username=f"candidate-concurrent-{index}",
+            qualification_status="manual_review",
+        )
+
+    from tiktok_bot_core.services.acquisition_agents import (
+        EnrichmentResult,
+        QualificationResult,
+    )
+
+    active = 0
+    max_active = 0
+
+    class ConcurrentEnrichmentAgent:
+        def __init__(self, *, router):
+            pass
+
+        async def run(self, **_):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(0.03)
+                return EnrichmentResult()
+            finally:
+                active -= 1
+
+    class FastQualificationAgent:
+        def __init__(self, *, router):
+            pass
+
+        async def run(self, **_):
+            return QualificationResult.model_validate(
+                _qualification_payload(suggested_status="manual_review")
+            )
+
+    monkeypatch.setattr(
+        "tiktok_bot_core.services.pipeline.EnrichmentAgent",
+        ConcurrentEnrichmentAgent,
+    )
+    monkeypatch.setattr(
+        "tiktok_bot_core.services.pipeline.QualificationAgent",
+        FastQualificationAgent,
+    )
+    monkeypatch.setattr(
+        "tiktok_bot_core.services.pipeline.get_llm_client", lambda: MagicMock()
+    )
+    monkeypatch.setattr(
+        "tiktok_bot_core.services.pipeline.get_settings",
+        lambda: SimpleNamespace(stage02_candidate_concurrency=2),
+    )
+    from tiktok_bot_core.services.pipeline import PipelineService
+
+    result = await PipelineService()._run_filter(
+        None, None, None, _context(job_id)
+    )
+
+    assert max_active == 2
+    assert result["total"] == 4
+    assert result["manual_review"] == 4
 
 
 def _add_linked_user(
