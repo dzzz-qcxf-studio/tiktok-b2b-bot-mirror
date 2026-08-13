@@ -140,6 +140,16 @@ class Database:
                     column_available = column.name in existing_columns
                     if not column_available:
                         sql_type = column.type.compile(dialect=self.engine.dialect)
+                        if table.name == "strategies" and column.name == "updated_at":
+                            # SQLite 不允许为已有表追加带
+                            # CURRENT_TIMESTAMP 的非空列；先追加可空列，
+                            # 再于同一迁移事务内回填历史行。
+                            additions.append(
+                                (table.name, column.name, sql_type, False)
+                            )
+                            column_available = True
+                            available_columns[table.name].add(column.name)
+                            continue
                         default = getattr(column, "default", None)
                         default_sql = None
                         if default is not None and default.is_scalar:
@@ -227,6 +237,26 @@ class Database:
                             "THEN 'qualified' "
                             "WHEN status = 'rejected' THEN 'rejected' "
                             "ELSE 'manual_review' END"
+                        )
+                    )
+                strategy_columns = available_columns.get("strategies", set())
+                if {"review_status", "review_version"} <= strategy_columns:
+                    conn.execute(
+                        text(
+                            "UPDATE strategies SET "
+                            "review_status = COALESCE(review_status, 'draft'), "
+                            "review_version = COALESCE(review_version, 0)"
+                        )
+                    )
+                if "updated_at" in strategy_columns:
+                    created_at_expression = (
+                        "created_at" if "created_at" in strategy_columns else "NULL"
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE strategies SET updated_at = "
+                            f"COALESCE(updated_at, {created_at_expression}, "
+                            "CURRENT_TIMESTAMP)"
                         )
                     )
                 job_user_columns = available_columns.get(
@@ -333,7 +363,6 @@ class Database:
                             f'ON "{table_name}" ("{column_name}")'
                         )
                     )
-                strategy_columns = available_columns.get("strategies", set())
                 message_columns = available_columns.get("messages", set())
                 if {"id", "job_id", "user_id"} <= strategy_columns:
                     duplicate = conn.execute(

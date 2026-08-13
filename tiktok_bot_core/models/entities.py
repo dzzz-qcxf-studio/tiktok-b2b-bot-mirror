@@ -61,6 +61,14 @@ class Strategy(Base):
     __tablename__ = "strategies"
     __table_args__ = (
         UniqueConstraint("job_id", "user_id", name="uq_strategy_job_user"),
+        CheckConstraint(
+            "review_status IN ('draft', 'approved', 'rejected')",
+            name="ck_strategy_review_status",
+        ),
+        CheckConstraint(
+            "review_version >= 0",
+            name="ck_strategy_review_version",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -74,7 +82,24 @@ class Strategy(Base):
     dm_template: Mapped[str] = mapped_column(Text, default="")
     action_plan: Mapped[str] = mapped_column(Text, default="")
     priority: Mapped[int] = mapped_column(Integer, default=3)
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="draft", server_default="draft", index=True
+    )
+    review_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
 
     user: Mapped["User"] = relationship(back_populates="strategies")
     job: Mapped[Optional["PipelineJob"]] = relationship(back_populates="strategies")
