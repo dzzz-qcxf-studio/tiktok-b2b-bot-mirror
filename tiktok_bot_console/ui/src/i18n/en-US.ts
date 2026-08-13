@@ -460,6 +460,8 @@ export default {
       evidence: 'Evidence',
       keywords: 'Keywords',
       pendingReview: 'Human review queue',
+      openManualReview: 'Open human review queue',
+      openEnrichmentReview: 'Review enrichment queue',
       matchScore: 'Average match',
       confidenceScore: 'Average confidence',
       discoveryStatuses: 'Discovery states',
@@ -486,6 +488,7 @@ export default {
     },
     reviewWorkbench: {
       title: 'Candidate human review',
+      openQueue: 'Human review workbench',
       jobContext: 'Current job · {jobId}',
       queue: 'Same-job candidate queue',
       queueEmpty: 'No candidates match the current filter.',

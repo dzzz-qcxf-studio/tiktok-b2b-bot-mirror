@@ -125,6 +125,15 @@
             </div>
             <div class="detail-actions">
               <button
+                v-if="isSelectedAcquisitionJob"
+                class="btn primary"
+                type="button"
+                data-testid="open-candidate-review"
+                @click="openCandidateReview(selectedJob.id, { qualificationStatus: 'manual_review' })"
+              >
+                {{ $t('pipeline.reviewWorkbench.openQueue') }}
+              </button>
+              <button
                 v-if="canCancel"
                 class="btn danger"
                 type="button"

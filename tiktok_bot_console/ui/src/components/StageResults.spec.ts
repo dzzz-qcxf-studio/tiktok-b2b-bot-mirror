@@ -177,7 +177,7 @@ describe('StageQualificationResult', () => {
     } as never)
   })
 
-  it('renders all four statuses, both scores and opens the exact human queue', async () => {
+  it('renders discoverable review actions plus all four statuses and both scores', async () => {
     const wrapper = mountQualification()
     await flushPromises()
 
@@ -188,8 +188,18 @@ describe('StageQualificationResult', () => {
     expect(wrapper.text()).toContain('78.5')
     expect(wrapper.text()).toContain('82.3')
 
+    const manualReviewAction = wrapper.get('[data-testid="stage-02-open-manual-review"]')
+    expect(manualReviewAction.text()).toContain('3')
+    await manualReviewAction.trigger('click')
+
+    const enrichmentAction = wrapper.get('[data-testid="stage-02-open-enrichment"]')
+    expect(enrichmentAction.text()).toContain('1')
+    await enrichmentAction.trigger('click')
+
     await wrapper.get('[data-qualification-status="manual_review"]').trigger('click')
     expect(wrapper.emitted('filter-candidates')).toEqual([
+      [{ qualificationStatus: 'manual_review' }],
+      [{ qualificationStatus: 'need_enrichment' }],
       [{ qualificationStatus: 'manual_review' }],
     ])
   })

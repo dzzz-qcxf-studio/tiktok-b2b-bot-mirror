@@ -460,6 +460,8 @@ export default {
       evidence: '证据',
       keywords: '关键词',
       pendingReview: '人工待办',
+      openManualReview: '打开人工复核队列',
+      openEnrichmentReview: '查看待补资料候选',
       matchScore: '平均匹配度',
       confidenceScore: '平均可信度',
       discoveryStatuses: '发现状态',
@@ -486,6 +488,7 @@ export default {
     },
     reviewWorkbench: {
       title: '候选客户人工复核',
+      openQueue: '人工复核工作台',
       jobContext: '当前任务 · {jobId}',
       queue: '同任务候选队列',
       queueEmpty: '当前筛选下没有候选客户。',

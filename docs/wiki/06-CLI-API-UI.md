@@ -1,7 +1,7 @@
 # 06 — CLI / API / UI 三层接口
 
 > 关联: [索引](00-索引.md) | [Pipeline](05-Pipeline.md) | [Skills](08-Skills.md)
-> 最后更新: 2026-08-11（Hermes H4-C 受认证实时 API 与前端客户端）
+> 最后更新: 2026-08-13（Pipeline 人工复核显式入口）
 
 ## 设计原则
 
@@ -13,6 +13,10 @@ Scheduler ──────────────────────┘
 
 CLI、API 与 Scheduler 都是统一 Job Service 的适配层。不存在按平台拆分的任务系统，
 也不存在绕过 SQLite 队列的同步 Pipeline 执行入口。
+
+Pipeline UI 对 AI 获客 Job 在详情顶部提供显式“人工复核工作台”入口；阶段 02 结果卡同时按
+`manual_review` 与 `need_enrichment` 显示带数量的待办按钮。用户不需要等待 Job 终态，也不需要
+猜测统计卡可点击；所有入口仍复用受认证的 Job-scoped Candidate API 和同一个复核抽屉。
 
 ## CLI 命令设计
 

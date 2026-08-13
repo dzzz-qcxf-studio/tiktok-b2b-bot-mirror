@@ -789,8 +789,15 @@ describe('Pipeline Hermes acquisition command center integration', () => {
     const wrapper = mountCommandCenter([job])
     await flushPromises()
 
-    await wrapper.get('[data-testid="discovery-filter"]').trigger('click')
+    const reviewEntry = wrapper.get('[data-testid="open-candidate-review"]')
+    expect(reviewEntry.text()).toContain('人工复核')
+    await reviewEntry.trigger('click')
     let drawer = wrapper.getComponent({ name: 'CandidateReviewDrawer' })
+    expect(drawer.props('jobId')).toBe('job-business-mode')
+    expect(drawer.props('filter')).toEqual({ qualificationStatus: 'manual_review' })
+
+    await wrapper.get('[data-testid="discovery-filter"]').trigger('click')
+    drawer = wrapper.getComponent({ name: 'CandidateReviewDrawer' })
     expect(wrapper.findAll('[data-testid="candidate-review-drawer"]')).toHaveLength(1)
     expect(drawer.props('jobId')).toBe('job-business-mode')
     expect(drawer.props('filter')).toEqual({ sourceType: 'video_comment' })

@@ -44,6 +44,29 @@
           </article>
         </div>
 
+        <div v-if="summary.pendingHumanReview > 0" class="review-actions">
+          <button
+            v-if="(summary.byQualificationStatus.manual_review ?? 0) > 0"
+            type="button"
+            class="review-action review-action--primary"
+            data-testid="stage-02-open-manual-review"
+            @click="emit('filter-candidates', { qualificationStatus: 'manual_review' })"
+          >
+            <span>{{ t('pipeline.stageResults.openManualReview') }}</span>
+            <strong>{{ summary.byQualificationStatus.manual_review ?? 0 }}</strong>
+          </button>
+          <button
+            v-if="(summary.byQualificationStatus.need_enrichment ?? 0) > 0"
+            type="button"
+            class="review-action"
+            data-testid="stage-02-open-enrichment"
+            @click="emit('filter-candidates', { qualificationStatus: 'need_enrichment' })"
+          >
+            <span>{{ t('pipeline.stageResults.openEnrichmentReview') }}</span>
+            <strong>{{ summary.byQualificationStatus.need_enrichment ?? 0 }}</strong>
+          </button>
+        </div>
+
         <div class="status-grid" aria-label="Qualification states">
           <button
             v-for="status in qualificationStatuses"
@@ -141,6 +164,16 @@ watch(
 .metric-card, .status-card { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); text-align: left; }
 .metric-card span, .status-card span { display: block; color: var(--muted); font-size: 11px; }
 .metric-card strong, .status-card strong { display: block; margin-top: 4px; color: var(--fg); font-family: var(--font-mono); font-size: 18px; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.review-action {
+  display: inline-flex; min-height: 44px; padding: 9px 14px; align-items: center; gap: 10px;
+  border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); color: var(--fg-2);
+  cursor: pointer; font-weight: 700;
+}
+.review-action strong { min-width: 24px; padding: 2px 7px; border-radius: 999px; background: var(--warn-soft); color: var(--fg); font-family: var(--font-mono); }
+.review-action--primary { border-color: var(--brand); background: var(--brand); color: white; }
+.review-action--primary strong { background: rgb(255 255 255 / .2); color: white; }
+.review-action:hover, .review-action:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
 .status-card { min-height: 58px; cursor: pointer; }
 .status-card:hover, .status-card:focus-visible { border-color: var(--brand); outline: none; }
@@ -151,6 +184,7 @@ watch(
 .stage-state--error { background: var(--err-soft); color: var(--err); }
 @media (max-width: 720px) {
   .metric-grid, .status-grid { grid-template-columns: 1fr 1fr; }
+  .review-action { justify-content: space-between; width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   .status-card { transition: none; }
